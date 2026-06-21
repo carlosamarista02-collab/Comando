@@ -9,7 +9,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ==========================================
 # CONFIGURACIÓN INICIAL
 # ==========================================
-TOKEN_TELEGRAM = '8939217389:AAEhdiOAxP4Ny7IY2BUsqSTlblPOdiNwflE'
+TOKEN_TELEGRAM = '8939217389:AAFeGTBV9iD9EOSYUWrijShORj_G9ZQ7aIo'
 URL_MINI_APP = 'https://stellar-moonbeam-bef640.netlify.app/'
 DATABASE = 'nueva_base_datos_v2.db'
 
