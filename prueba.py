@@ -1,5 +1,6 @@
 import threading
 import sqlite3
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import telebot
@@ -9,7 +10,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # CONFIGURACIÓN INICIAL
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAEhdiOAxP4Ny7IY2BUsqSTlblPOdiNwflE'
-URL_MINI_APP = 'https://jade-douhua-662d56.netlify.app/'
+URL_MINI_APP = 'https://stellar-moonbeam-bef640.netlify.app/'
 DATABASE = 'tu_base_de_datos.db'
 
 # Administrador configurado con tu ID
@@ -89,7 +90,7 @@ def enviar_bienvenida(message):
     # Teclado con todas las opciones solicitadas
     markup = InlineKeyboardMarkup(row_width=2)
     
-    boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
+    boton_jugar = InlineKeyboardButton(text="🚀 Play FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
     boton_noticia = InlineKeyboardButton(text="📢 Noticias", callback_data="ver_noticias")
     boton_recarga = InlineKeyboardButton(text="💳 Solicitar Recarga", callback_data="solicitar_recarga")
     boton_retiro = InlineKeyboardButton(text="💰 Solicitar Retiro", callback_data="solicitar_retiro")
@@ -260,24 +261,17 @@ def correr_bot_telegram():
             time.sleep(5)
 
 # ==========================================
-# ARRANQUE UNIFICADO CON AUTENTICACIÓN NGROK
+# ARRANQUE UNIFICADO ADAPTADO A RENDER
 # ==========================================
 if __name__ == '__main__':
     inicializar_base_datos()
+    
+    # Iniciamos el Bot de Telegram en su propio hilo secundario
     hilo_bot = threading.Thread(target=correr_bot_telegram)
     hilo_bot.daemon = True
     hilo_bot.start()
     
-    # Inyectar credenciales fijas y conectar al dominio estático
-    try:
-        from pyngrok import ngrok
-        ngrok.set_auth_token("3FP3F1GjeCxVRFOkXmXf8nX5fRZ_7YopUqd7cJpGAM7BCavSk")
-        tunel = ngrok.connect(5000, hostname="getaway-undertook-legibly.ngrok-free.dev")
-        print("\n" + "="*60)
-        print(f"🚀 TU DOMINIO FIJO ESTÁ TOTALMENTE ACTIVO:\n{tunel.public_url}")
-        print("="*60 + "\n")
-    except Exception as e:
-        print(f"⚠️ Ngrok no configurado de forma automática ({e}). Usando IP de red local.")
-    
-    print("[API] Iniciando servidor Flask para la Mini App...")
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    # Render asigna el puerto mediante la variable de entorno PORT, si no existe usa el 10000
+    puerto = int(os.environ.get("PORT", 10000))
+    print(f"[API] Iniciando servidor Flask en el puerto {puerto}...")
+    app.run(host='0.0.0.0', port=puerto, debug=False, use_reloader=False)
