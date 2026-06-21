@@ -90,7 +90,7 @@ def enviar_bienvenida(message):
     # Teclado con todas las opciones solicitadas
     markup = InlineKeyboardMarkup(row_width=2)
     
-    boton_jugar = InlineKeyboardButton(text="🚀 Play FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
+    boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
     boton_noticia = InlineKeyboardButton(text="📢 Noticias", callback_data="ver_noticias")
     boton_recarga = InlineKeyboardButton(text="💳 Solicitar Recarga", callback_data="solicitar_recarga")
     boton_retiro = InlineKeyboardButton(text="💰 Solicitar Retiro", callback_data="solicitar_retiro")
@@ -130,11 +130,15 @@ def manejar_botones(call):
 
     elif call.data == "solicitar_recarga":
         bot.answer_callback_query(call.id)
+        # Limpia cualquier paso de espera viejo en este chat para evitar colisiones
+        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
         msg = bot.send_message(call.message.chat.id, "✍️ Ingresa el monto en USDT que deseas **recargar**:")
         bot.register_next_step_handler(msg, procesar_solicitud_fondos, "RECARGA")
 
     elif call.data == "solicitar_retiro":
         bot.answer_callback_query(call.id)
+        # Limpia cualquier paso de espera viejo en este chat para evitar colisiones
+        bot.clear_step_handler_by_chat_id(chat_id=call.message.chat.id)
         msg = bot.send_message(call.message.chat.id, "✍️ Ingresa el monto en USDT que deseas **retirar**:")
         bot.register_next_step_handler(msg, procesar_solicitud_fondos, "RETIRO")
 
@@ -157,7 +161,7 @@ def manejar_botones(call):
         for tx_id, u_id, tipo, monto in pendientes:
             markup_tx = InlineKeyboardMarkup()
             btn_aprobar = InlineKeyboardButton(text="✅ Aprobar", callback_data=f"aprob_{tx_id}")
-            btn_rechazar = InlineKeyboardButton(text="❌ Rechazar", callback_data=f"rech_{tx_id}")
+            btn_rechazar = InlineKeyboardButton(text="❌ Reject", callback_data=f"rech_{tx_id}")
             markup_tx.row(btn_aprobar, btn_rechazar)
 
             bot.send_message(
