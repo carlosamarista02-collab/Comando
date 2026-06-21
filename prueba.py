@@ -11,7 +11,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAEhdiOAxP4Ny7IY2BUsqSTlblPOdiNwflE'
 URL_MINI_APP = 'https://stellar-moonbeam-bef640.netlify.app/'
-DATABASE = 'tu_base_de_datos.db'
+DATABASE = 'nueva_base_datos_v2.db'
 
 # Administrador configurado con tu ID
 ADMIN_ID = 6808824866  
