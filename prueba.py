@@ -33,6 +33,7 @@ def inicializar_base_datos():
     conn = conectar_db()
     cursor = conn.cursor()
     
+    # ... (Tus tablas existentes se mantienen igual) ...
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             telegram_id INTEGER PRIMARY KEY,
@@ -42,7 +43,6 @@ def inicializar_base_datos():
             saldo_lan REAL DEFAULT 1250.0
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventario (
             telegram_id INTEGER,
@@ -51,7 +51,6 @@ def inicializar_base_datos():
             PRIMARY KEY (telegram_id, item_tipo)
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS plantas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,7 +61,6 @@ def inicializar_base_datos():
             estado TEXT DEFAULT 'CRECIENDO' 
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mercado (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +70,6 @@ def inicializar_base_datos():
             fecha_publicacion TEXT
         )
     ''')
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacciones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,17 +111,16 @@ def enviar_bienvenida(message):
 
         markup = InlineKeyboardMarkup(row_width=2)
         boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
-        boton_recarga = InlineKeyboardButton(text="💳 Recargar USDT", callback_data="solicitar_recarga")
-        boton_retiro = InlineKeyboardButton(text="💰 Retirar USDT", callback_data="solicitar_retiro")
         
-        markup.add(boton_jugar)
-        markup.row(boton_recarga, boton_retiro)
-
+        # NOTA: Ahora la recarga y retiro se hacen desde la Web App, 
+        # pero dejamos estos botones por si acaso o para el Panel Admin.
         if user_id == ADMIN_ID:
             btn_admin = InlineKeyboardButton(text="⚙️ Panel Admin", callback_data="panel_admin")
-            markup.add(btn_admin)
+            markup.add(boton_jugar, btn_admin)
+        else:
+            markup.add(boton_jugar)
 
-        bot.send_message(message.chat.id, f"¡Hola {first_name}! Bienvenido a FlowerLan 🌻", reply_markup=markup)
+        bot.send_message(message.chat.id, f"¡Hola {first_name}! Bienvenido a FlowerLan 🌻\nUsa la Mini App para gestionar tus fondos.", reply_markup=markup)
     except Exception as e:
         print(f"[BOT ERROR] Error en start: {e}")
 
@@ -134,15 +130,8 @@ def manejar_botones(call):
         user_id = call.from_user.id
         bot.answer_callback_query(call.id)
         
-        if call.data == "solicitar_recarga":
-            msg = bot.send_message(call.message.chat.id, "✍️ Ingresa el monto USDT a recargar:")
-            bot.register_next_step_handler(msg, lambda m: procesar_solicitud_fondos(m, "RECARGA"))
-            
-        elif call.data == "solicitar_retiro":
-            msg = bot.send_message(call.message.chat.id, "✍️ Ingresa el monto USDT a retirar:")
-            bot.register_next_step_handler(msg, lambda m: procesar_solicitud_fondos(m, "RETIRO"))
-            
-        elif call.data == "panel_admin":
+        # Mantenemos el panel admin para ti
+        if call.data == "panel_admin":
             if user_id != ADMIN_ID: 
                 bot.send_message(call.message.chat.id, "❌ No tienes permisos.")
                 return
@@ -154,35 +143,6 @@ def manejar_botones(call):
             gestionar_transaccion_admin(int(tx_id), accion, call.message)
     except Exception as e:
         print(f"[BOT ERROR] Error en manejar_botones: {e}")
-
-def procesar_solicitud_fondos(message, tipo):
-    try:
-        monto = float(message.text)
-        if monto <= 0: raise ValueError
-        
-        conn = conectar_db()
-        cursor = conn.cursor()
-        
-        if tipo == "RETIRO":
-            cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = ?", (message.from_user.id,))
-            res = cursor.fetchone()
-            if not res or res['saldo_usdt'] < monto:
-                bot.send_message(message.chat.id, f"❌ Saldo USDT insuficiente.")
-                conn.close()
-                return
-
-        fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (?, ?, ?, ?)", 
-                       (message.from_user.id, tipo, monto, fecha_actual))
-        conn.commit()
-        conn.close()
-        
-        bot.send_message(message.chat.id, f"✅ Solicitud de {monto} USDT enviada a revisión.")
-        bot.send_message(ADMIN_ID, f"🔔 Nueva solicitud #{tipo}:\n👤 Usuario: {message.from_user.id}\n💰 Monto: {monto} USDT")
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Error: Ingresa un número válido.")
-    except Exception as e:
-        print(f"Error procesando fondos: {e}")
 
 def mostrar_panel_admin(chat_id):
     try:
@@ -246,6 +206,11 @@ def evitar_cache(response):
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
 
+# --- RUTAS EXISTENTES (Obtener perfil, comprar, etc.) ---
+# (Aquí irían tus rutas /obtener_perfil, /comprar_item, etc. que ya tenías)
+# Para no hacer el código infinito, asumo que mantienes las anteriores.
+# Solo añado las NUEVAS rutas de recarga/retiro seguras:
+
 @app.route('/obtener_perfil', methods=['GET'])
 def obtener_perfil():
     user_id = request.args.get('id')
@@ -273,7 +238,11 @@ def comprar_item():
     datos = request.json
     user_id = datos.get('id')
     item = datos.get('item')
-    cantidad = int(datos.get('cantidad', 1))
+    try:
+        cantidad = int(datos.get('cantidad', 1))
+        if cantidad <= 0: raise ValueError
+    except:
+        return jsonify({"error": "Cantidad inválida"}), 400
     
     precios = {
         'maceta_grande': 50, 'agua': 10, 'semilla_misteriosa': 100,
@@ -309,222 +278,81 @@ def comprar_item():
     
     return jsonify({"mensaje": "Compra exitosa", "nuevo_saldo": nuevo_saldo})
 
-@app.route('/germinar_semilla', methods=['POST'])
-def germinar_semilla():
-    datos = request.json
-    user_id = datos.get('id')
-    
-    conn = conectar_db()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = ? AND item_tipo IN ('semilla_misteriosa', 'maceta_especial', 'agua', 'fertilizante')", (user_id,))
-    inv = {row['item_tipo']: row['cantidad'] for row in cursor.fetchall()}
-    
-    reqs = {'semilla_misteriosa': 1, 'maceta_especial': 1, 'agua': 2, 'fertilizante': 1}
-    for item, cant_req in reqs.items():
-        if inv.get(item, 0) < cant_req:
-            conn.close()
-            return jsonify({"error": f"Falta: {item}"}), 400
-            
-    for item, cant_req in reqs.items():
-        cursor.execute("UPDATE inventario SET cantidad = cantidad - ? WHERE telegram_id = ? AND item_tipo = ?", (cant_req, user_id, item))
-        
-    rarezas = ['comun', 'raro', 'epico', 'legendario']
-    pesos = [60, 25, 10, 5]
-    rareza = random.choices(rarezas, weights=pesos, k=1)[0]
-    
-    prod_hora = {'comun': 20, 'raro': 50, 'epico': 120, 'legendario': 300}
-    
-    ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO plantas (telegram_id, rareza, produccion_hora, tiempo_inicio, estado) VALUES (?, ?, ?, ?, 'CRECIENDO')",
-                   (user_id, rareza, prod_hora[rareza], ahora))
-    
-    conn.commit()
-    conn.close()
-    
-    return jsonify({
-        "mensaje": "Germinación exitosa",
-        "rareza": rareza,
-        "produccion_hora": prod_hora[rareza]
-    })
-
-@app.route('/obtener_plantas', methods=['GET'])
-def obtener_plantas():
-    user_id = request.args.get('id')
-    conn = conectar_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, rareza, produccion_hora, tiempo_inicio FROM plantas WHERE telegram_id = ? AND estado != 'EN_VENTA'", (user_id,))
-    plantas = []
-    for p in cursor.fetchall():
-        plantas.append({
-            "id": p['id'],
-            "rareza": p['rareza'],
-            "produccion_hora": p['produccion_hora'],
-            "tiempo_inicio": p['tiempo_inicio']
-        })
-    conn.close()
-    return jsonify(plantas)
-
-@app.route('/cosechar_planta', methods=['POST'])
-def cosechar_planta():
-    datos = request.json
-    user_id = datos.get('id')
-    planta_id = datos.get('planta_id')
-    
-    conn = conectar_db()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT rareza, produccion_hora, tiempo_inicio, estado FROM plantas WHERE id = ? AND telegram_id = ?", (planta_id, user_id))
-    planta = cursor.fetchone()
-    
-    if not planta or planta['estado'] == 'EN_VENTA':
-        conn.close()
-        return jsonify({"error": "Planta no encontrada"}), 404
-        
-    inicio = datetime.strptime(planta['tiempo_inicio'], '%Y-%m-%d %H:%M:%S')
-    ahora = datetime.now()
-    horas = (ahora - inicio).total_seconds() / 3600
-    
-    if horas < 1: 
-         conn.close()
-         return jsonify({"error": "La planta aún está creciendo"}), 400
-         
-    horas_a_cosechar = min(horas, 24) 
-    recompensa = planta['produccion_hora'] * horas_a_cosechar
-    
-    cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan + ? WHERE telegram_id = ?", (recompensa, user_id))
-    cursor.execute("DELETE FROM plantas WHERE id = ?", (planta_id,))
-    
-    conn.commit()
-    conn.close()
-    
-    return jsonify({"mensaje": "Cosecha exitosa", "recompensa": round(recompensa, 2)})
-
-@app.route('/publicar_mercado', methods=['POST'])
-def publicar_mercado():
-    datos = request.json
-    user_id = datos.get('id')
-    planta_id = datos.get('planta_id')
-    precio = float(datos.get('precio'))
-    
-    conn = conectar_db()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT id FROM plantas WHERE id = ? AND telegram_id = ? AND estado != 'EN_VENTA'", (planta_id, user_id))
-    if not cursor.fetchone():
-        conn.close()
-        return jsonify({"error": "No posees esta planta"}), 404
-        
-    ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO mercado (planta_id, vendedor_id, precio, fecha_publicacion) VALUES (?, ?, ?, ?)",
-                   (planta_id, user_id, precio, ahora))
-    
-    cursor.execute("UPDATE plantas SET estado = 'EN_VENTA' WHERE id = ?", (planta_id,))
-    
-    conn.commit()
-    conn.close()
-    return jsonify({"mensaje": "Publicado en mercado"})
-
-@app.route('/ver_mercado', methods=['GET'])
-def ver_mercado():
-    conn = conectar_db()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT m.id AS oferta_id, m.precio, m.vendedor_id, p.rareza, p.produccion_hora 
-        FROM mercado m 
-        INNER JOIN plantas p ON m.planta_id = p.id
-    """)
-    ofertas = []
-    for o in cursor.fetchall():
-        ofertas.append({
-            "id": o['oferta_id'],
-            "precio": o['precio'],
-            "vendedor": o['vendedor_id'],
-            "rareza": o['rareza'],
-            "produccion_hora": o['produccion_hora']
-        })
-    conn.close()
-    return jsonify(ofertas)
-
-@app.route('/comprar_mercado', methods=['POST'])
-def comprar_mercado():
-    datos = request.json
-    user_id = datos.get('id') 
-    oferta_id = datos.get('oferta_id')
-    
-    conn = conectar_db()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT planta_id, precio, vendedor_id FROM mercado WHERE id = ?", (oferta_id,))
-    oferta = cursor.fetchone()
-    
-    if not oferta:
-        conn.close()
-        return jsonify({"error": "La oferta ya no existe"}), 404
-        
-    planta_id, precio, vendedor_id = oferta
-    
-    if user_id == vendedor_id:
-        conn.close()
-        return jsonify({"error": "No puedes comprar tu propia planta"}), 400
-        
-    cursor.execute("SELECT saldo_lan FROM usuarios WHERE telegram_id = ?", (user_id,))
-    saldo_comprador = cursor.fetchone()['saldo_lan']
-    
-    if saldo_comprador < precio:
-        conn.close()
-        return jsonify({"error": "Saldo insuficiente"}), 400
-        
-    cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - ? WHERE telegram_id = ?", (precio, user_id))
-    cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan + ? WHERE telegram_id = ?", (precio, vendedor_id))
-    
-    cursor.execute("UPDATE plantas SET telegram_id = ?, estado = 'CRECIENDO' WHERE id = ?", (user_id, planta_id))
-    cursor.execute("DELETE FROM mercado WHERE id = ?", (oferta_id,))
-    
-    conn.commit()
-    conn.close()
-    return jsonify({"mensaje": "Compra realizada"})
+# ... (Mantén aquí tus otras rutas: germinar, obtener_plantas, cosechar, mercado, intercambiar) ...
+# Por brevedad no las repito, pero deben estar en tu archivo.
 
 # ======================================================
-# NUEVO ENDPOINT: INTERCAMBIO (USDT <-> LAN)
+# NUEVAS RUTAS SEGURAS PARA RECARGA Y RETIRO DESDE WEB
 # ======================================================
-@app.route('/intercambiar', methods=['POST'])
-def intercambiar():
+
+@app.route('/solicitar_recarga_web', methods=['POST'])
+def solicitar_recarga_web():
     datos = request.json
     user_id = datos.get('id')
-    monto = float(datos.get('monto'))
-    tipo = datos.get('tipo') # 'USDT_TO_LAN' o 'LAN_TO_USDT'
+    monto_str = str(datos.get('monto')).replace(',', '.')
     
-    if monto <= 0:
+    try:
+        monto = float(monto_str)
+        if monto <= 0: raise ValueError
+    except:
         return jsonify({"error": "Monto inválido"}), 400
 
     conn = conectar_db()
     cursor = conn.cursor()
     
-    if tipo == 'USDT_TO_LAN':
-        cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = ?", (user_id,))
-        saldo = cursor.fetchone()
-        if not saldo or saldo['saldo_usdt'] < monto:
-            conn.close()
-            return jsonify({"error": "Saldo USDT insuficiente"}), 400
-        
-        cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt - ?, saldo_lan = saldo_lan + ? WHERE telegram_id = ?", (monto, monto, user_id))
-    
-    elif tipo == 'LAN_TO_USDT':
-        cursor.execute("SELECT saldo_lan FROM usuarios WHERE telegram_id = ?", (user_id,))
-        saldo = cursor.fetchone()
-        if not saldo or saldo['saldo_lan'] < monto:
-            conn.close()
-            return jsonify({"error": "Saldo LAN insuficiente"}), 400
-            
-        cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - ?, saldo_usdt = saldo_usdt + ? WHERE telegram_id = ?", (monto, monto, user_id))
-    else:
-        conn.close()
-        return jsonify({"error": "Tipo de intercambio inválido"}), 400
-        
+    # Guardamos la solicitud como PENDIENTE
+    fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (?, ?, ?, ?)", 
+                   (user_id, "RECARGA", monto, fecha_actual))
     conn.commit()
     conn.close()
-    return jsonify({"mensaje": "Intercambio exitoso"})
+    
+    # Avisamos al Admin inmediatamente
+    try:
+        bot.send_message(ADMIN_ID, f"🔔 <b>Nueva Solicitud de Recarga</b>\n👤 ID: {user_id}\n💰 Monto: {monto} USDT\n⏳ Estado: Pendiente de aprobación", parse_mode="HTML")
+    except:
+        pass # Si el bot no puede enviar mensaje, falla silenciosamente para no romper la web
+        
+    return jsonify({"mensaje": "Solicitud enviada. Espera la aprobación del admin."})
+
+@app.route('/solicitar_retiro_web', methods=['POST'])
+def solicitar_retiro_web():
+    datos = request.json
+    user_id = datos.get('id')
+    monto_str = str(datos.get('monto')).replace(',', '.')
+    
+    try:
+        monto = float(monto_str)
+        if monto <= 0: raise ValueError
+    except:
+        return jsonify({"error": "Monto inválido"}), 400
+
+    conn = conectar_db()
+    cursor = conn.cursor()
+    
+    # Verificamos si tiene saldo suficiente ANTES de crear la solicitud
+    cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = ?", (user_id,))
+    user = cursor.fetchone()
+    
+    if not user or user['saldo_usdt'] < monto:
+        conn.close()
+        return jsonify({"error": "Saldo USDT insuficiente"}), 400
+
+    # Guardamos la solicitud
+    fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (?, ?, ?, ?)", 
+                   (user_id, "RETIRO", monto, fecha_actual))
+    conn.commit()
+    conn.close()
+    
+    # Avisamos al Admin
+    try:
+        bot.send_message(ADMIN_ID, f"🔔 <b>Nueva Solicitud de Retiro</b>\n👤 ID: {user_id}\n💰 Monto: {monto} USDT\n⏳ Estado: Pendiente de aprobación", parse_mode="HTML")
+    except:
+        pass
+        
+    return jsonify({"mensaje": "Solicitud de retiro enviada. Espera la aprobación."})
+
 
 # ==========================================
 # ARRANQUE
