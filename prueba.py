@@ -13,7 +13,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # CONFIGURACIÓN INICIAL
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAEjcV86PramtLXvZ2sLCnCB8xrX8ZzFEMQ'
-URL_MINI_APP = 'https://jade-douhua-662d56.netlify.app/' 
+URL_MINI_APP = 'https://ubiquitous-sfogliatella-c8c582.netlify.app/' 
 DATABASE = 'flowerlan_db.db'
 ADMIN_ID = 6808824866
 
@@ -104,54 +104,55 @@ def inicializar_base_datos():
     print("[DB] Base de datos inicializada correctamente.")
 
 # ==========================================
-# LÓGICA DEL BOT DE TELEGRAM (CORREGIDO)
+# LÓGICA DEL BOT DE TELEGRAM (REPARADO)
 # ==========================================
 @bot.message_handler(commands=['start'])
 def enviar_bienvenida(message):
-    user_id = message.from_user.id
-    first_name = message.from_user.first_name
-    username = message.from_user.username or ''
-    
-    conn = conectar_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT telegram_id FROM usuarios WHERE telegram_id = ?", (user_id,))
-    existe = cursor.fetchone()
+    try:
+        user_id = message.from_user.id
+        first_name = message.from_user.first_name
+        username = message.from_user.username or ''
+        
+        conn = conectar_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id FROM usuarios WHERE telegram_id = ?", (user_id,))
+        existe = cursor.fetchone()
 
-    if not existe:
-        cursor.execute(
-            "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (?, ?, ?, 0.0, 1250.0)",
-            (user_id, first_name, username)
-        )
-        cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, quantity) VALUES (?, 'maceta_grande', 2)")
-        cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, cantidad) VALUES (?, 'maceta_grande', 2)", (user_id,))
-        cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, cantidad) VALUES (?, 'agua', 5)", (user_id,))
-        conn.commit()
-        print(f"[DB] Nuevo usuario registrado: {first_name} ({user_id})")
-    conn.close()
+        if not existe:
+            cursor.execute(
+                "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (?, ?, ?, 0.0, 1250.0)",
+                (user_id, first_name, username)
+            )
+            # Líneas corregidas sin duplicaciones ni errores de parámetros
+            cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, cantidad) VALUES (?, 'maceta_grande', 2)", (user_id,))
+            cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, cantidad) VALUES (?, 'agua', 5)", (user_id,))
+            conn.commit()
+            print(f"[DB] Nuevo usuario registrado: {first_name} ({user_id})")
+        conn.close()
 
-    markup = InlineKeyboardMarkup(row_width=2)
-    boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
-    boton_recarga = InlineKeyboardButton(text="💳 Recargar USDT", callback_data="solicitar_recarga")
-    boton_retiro = InlineKeyboardButton(text="💰 Retirar USDT", callback_data="solicitar_retiro")
-    
-    markup.add(boton_jugar)
-    markup.row(boton_recarga, boton_retiro)
+        markup = InlineKeyboardMarkup(row_width=2)
+        boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
+        boton_recarga = InlineKeyboardButton(text="💳 Recargar USDT", callback_data="solicitar_recarga")
+        boton_retiro = InlineKeyboardButton(text="💰 Retirar USDT", callback_data="solicitar_retiro")
+        
+        markup.add(boton_jugar)
+        markup.row(boton_recarga, boton_retiro)
 
-    if user_id == ADMIN_ID:
-        btn_admin = InlineKeyboardButton(text="⚙️ Panel Admin", callback_data="panel_admin")
-        markup.add(btn_admin)
+        if user_id == ADMIN_ID:
+            btn_admin = InlineKeyboardButton(text="⚙️ Panel Admin", callback_data="panel_admin")
+            markup.add(btn_admin)
 
-    bot.send_message(message.chat.id, f"¡Hola {first_name}! Bienvenido a FlowerLan 🌻", reply_markup=markup)
+        bot.send_message(message.chat.id, f"¡Hola {first_name}! Bienvenido a FlowerLan 🌻", reply_markup=markup)
+    except Exception as e:
+        print(f"[BOT ERROR] Error en start: {e}")
 
 @bot.callback_query_handler(func=lambda call: True)
 def manejar_botones(call):
     user_id = call.from_user.id
-    # 🌟 CORRECCIÓN: Responde de inmediato para evitar que el botón inline se quede trabado
     bot.answer_callback_query(call.id)
     
     if call.data == "solicitar_recarga":
         msg = bot.send_message(call.message.chat.id, "✍️ Ingresa el monto USDT a recargar:")
-        # 🌟 CORRECCIÓN: Uso de función lambda para enviar correctamente el tipo
         bot.register_next_step_handler(msg, lambda m: procesar_solicitud_fondos(m, "RECARGA"))
         
     elif call.data == "solicitar_retiro":
@@ -177,7 +178,6 @@ def procesar_solicitud_fondos(message, tipo):
         conn = conectar_db()
         cursor = conn.cursor()
         
-        # 🌟 CORRECCIÓN: Comprobación de fondos previo a guardar la solicitud de retiro
         if tipo == "RETIRO":
             cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = ?", (message.from_user.id,))
             res = cursor.fetchone()
@@ -248,7 +248,6 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
 # API FLASK PARA LA MINI APP (JUEGO)
 # ==========================================
 
-# 1. Obtener Perfil Completo
 @app.route('/obtener_perfil', methods=['GET'])
 def obtener_perfil():
     user_id = request.args.get('id')
@@ -261,7 +260,6 @@ def obtener_perfil():
         return jsonify({"usdt": data[0], "lan": data[1]})
     return jsonify({"error": "Usuario no registrado"}), 404
 
-# 2. Obtener Inventario
 @app.route('/obtener_inventario', methods=['GET'])
 def obtener_inventario():
     user_id = request.args.get('id')
@@ -272,7 +270,6 @@ def obtener_inventario():
     conn.close()
     return jsonify(items)
 
-# 3. Comprar Item en Tienda
 @app.route('/comprar_item', methods=['POST'])
 def comprar_item():
     datos = request.json
@@ -319,7 +316,6 @@ def comprar_item():
     
     return jsonify({"mensaje": "Compra exitosa", "nuevo_saldo": nuevo_saldo})
 
-# 4. Germinar Semilla (Crear Planta)
 @app.route('/germinar_semilla', methods=['POST'])
 def germinar_semilla():
     datos = request.json
@@ -359,7 +355,6 @@ def germinar_semilla():
         "produccion_hora": prod_hora[rareza]
     })
 
-# 5. Obtener Plantas Activas
 @app.route('/obtener_plantas', methods=['GET'])
 def obtener_plantas():
     user_id = request.args.get('id')
@@ -377,7 +372,6 @@ def obtener_plantas():
     conn.close()
     return jsonify(plantas)
 
-# 6. Cosechar Planta
 @app.route('/cosechar_planta', methods=['POST'])
 def cosechar_planta():
     datos = request.json
@@ -412,7 +406,6 @@ def cosechar_planta():
     
     return jsonify({"mensaje": "Cosecha exitosa", "recompensa": round(recompensa, 2)})
 
-# 7. Publicar en Mercado
 @app.route('/publicar_mercado', methods=['POST'])
 def publicar_mercado():
     datos = request.json
@@ -438,7 +431,6 @@ def publicar_mercado():
     conn.close()
     return jsonify({"mensaje": "Publicado en mercado con éxito"})
 
-# 8. Ver Mercado Global
 @app.route('/ver_mercado', methods=['GET'])
 def ver_mercado():
     conn = conectar_db()
@@ -460,7 +452,6 @@ def ver_mercado():
     conn.close()
     return jsonify(ofertas)
 
-# 9. Comprar en Mercado
 @app.route('/comprar_mercado', methods=['POST'])
 def comprar_mercado():
     datos = request.json
@@ -518,4 +509,3 @@ if __name__ == '__main__':
     puerto = int(os.environ.get("PORT", 10000))
     print(f"🚀 Servidor FlowerLan activo en el puerto dinámico: {puerto}")
     app.run(host='0.0.0.0', port=puerto, debug=False, use_reloader=False)
-
