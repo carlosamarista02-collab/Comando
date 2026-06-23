@@ -292,17 +292,35 @@ def germinar_semilla():
     conn = conectar_db()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = ? AND item_tipo IN ('semilla_misteriosa', 'maceta_especial', 'agua', 'fertilizante')", (user_id,))
+    # Buscamos los recursos del jugador en la DB
+    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = ?", (user_id,))
     inv = {row['item_tipo']: row['cantidad'] for row in cursor.fetchall()}
     
-    reqs = {'semilla_misteriosa': 1, 'maceta_especial': 1, 'agua': 2, 'fertilizante': 1}
-    for item, cant_req in reqs.items():
-        if inv.get(item, 0) < cant_req:
-            conn.close()
-            return jsonify({"error": f"Falta: {item}"}), 400
+    # Validación flexible: Permite usar tanto maceta_grande como maceta_especial
+    tipo_maceta = None
+    if inv.get('maceta_grande', 0) >= 1:
+        tipo_maceta = 'maceta_grande'
+    elif inv.get('maceta_especial', 0) >= 1:
+        tipo_maceta = 'maceta_especial'
+        
+    if inv.get('semilla_misteriosa', 0) < 1:
+        conn.close()
+        return jsonify({"error": "No tienes semilla misteriosa para germinar"}), 400
+    if not tipo_maceta:
+        conn.close()
+        return jsonify({"error": "No tienes ninguna maceta disponible"}), 400
+    if inv.get('agua', 0) < 2:
+        conn.close()
+        return jsonify({"error": "Agua insuficiente (requieres 2 unidades)"}), 400
+    if inv.get('fertilizante', 0) < 1:
+        conn.close()
+        return jsonify({"error": "No tienes fertilizante disponible"}), 400
             
-    for item, cant_req in reqs.items():
-        cursor.execute("UPDATE inventario SET cantidad = cantidad - ? WHERE telegram_id = ? AND item_tipo = ?", (cant_req, user_id, item))
+    # Consumir los ítems validados
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - 1 WHERE telegram_id = ? AND item_tipo = 'semilla_misteriosa'", (user_id,))
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - 1 WHERE telegram_id = ? AND item_tipo = ?", (user_id, tipo_maceta))
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - 2 WHERE telegram_id = ? AND item_tipo = 'agua'", (user_id,))
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - 1 WHERE telegram_id = ? AND item_tipo = 'fertilizante'", (user_id,))
         
     rarezas = ['comun', 'raro', 'epico', 'legendario']
     pesos = [60, 25, 10, 5]
