@@ -17,9 +17,8 @@ TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
 URL_MINI_APP = 'https://glistening-buttercream-e53584.netlify.app/' 
 ADMIN_ID = 6808824866 
 
-# Pegamos tu URL definitiva de Supabase sin los corchetes
+# URL definitiva usando el Transaction Pooler (IPv4 compatible con Render)
 DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:72bGmBxf6qzb-iY@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
-
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
@@ -29,7 +28,6 @@ CORS(app)
 # GESTIÓN DE BASE DE DATOS (POSTGRESQL)
 # ==========================================
 def conectar_db():
-    # Nos conectamos a la nube de Supabase usando RealDictCursor para mantener la lectura por nombre de columna
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
@@ -37,7 +35,6 @@ def inicializar_base_datos():
     conn = conectar_db()
     cursor = conn.cursor()
     
-    # 1. Tabla Usuarios (Cambio de tipos a BIGINT para IDs de Telegram)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             telegram_id BIGINT PRIMARY KEY,
@@ -48,7 +45,6 @@ def inicializar_base_datos():
         )
     ''')
     
-    # 2. Tabla Inventario
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventario (
             telegram_id BIGINT,
@@ -58,7 +54,6 @@ def inicializar_base_datos():
         )
     ''')
     
-    # 3. Tabla Plantas (AUTOINCREMENT cambia por SERIAL)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS plantas (
             id SERIAL PRIMARY KEY,
@@ -70,7 +65,6 @@ def inicializar_base_datos():
         )
     ''')
     
-    # 4. Tabla Mercado
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mercado (
             id SERIAL PRIMARY KEY,
@@ -81,7 +75,6 @@ def inicializar_base_datos():
         )
     ''')
     
-    # 5. Tabla Transacciones
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacciones (
             id SERIAL PRIMARY KEY,
@@ -98,7 +91,7 @@ def inicializar_base_datos():
     conn.close()
 
 # ==========================================
-# LÓGICA DEL BOT DE TELEGRAM
+# LÓGICA DEL BOT DE TELEGRAM (ENTRADA DIRECTA)
 # ==========================================
 @bot.message_handler(commands=['start'])
 def enviar_bienvenida(message):
@@ -117,7 +110,6 @@ def enviar_bienvenida(message):
                 "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (%s, %s, %s, 0.0, 1250.0)",
                 (user_id, first_name, username)
             )
-            # Adaptación para Postgres (ON CONFLICT DO NOTHING reemplaza a INSERT OR IGNORE)
             cursor.execute("""
                 INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES (%s, 'maceta_grande', 2)
                 ON CONFLICT (telegram_id, item_tipo) DO NOTHING
@@ -131,6 +123,7 @@ def enviar_bienvenida(message):
         cursor.close()
         conn.close()
 
+        # El menú se genera de forma limpia, sin intermediarios de canales externos
         markup = InlineKeyboardMarkup(row_width=2)
         boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
         
@@ -236,7 +229,7 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
         cursor.close()
         conn.close()
     except Exception as e:
-        print(f"Error gestionando transacción: {e}")
+        print(f"Error gestiónando transacción: {e}")
 
 # ==========================================
 # API FLASK PARA LA MINI APP
@@ -304,7 +297,6 @@ def comprar_item():
         
     cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - %s WHERE telegram_id = %s", (costo_total, user_id))
     
-    # Adaptación para Postgres (Sintaxis ON CONFLICT)
     cursor.execute("""
         INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
         VALUES (%s, %s, %s) 
@@ -334,7 +326,6 @@ def solicitar_recarga_web():
     cursor = conn.cursor()
     
     fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # Se usa RETURNING id en Postgres para obtener el id recién creado de la transacción
     cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (%s, %s, %s, %s) RETURNING id", 
                    (user_id, "RECARGA", monto, fecha_actual))
     tx_id = cursor.fetchone()[0]
@@ -401,7 +392,6 @@ def correr_bot_telegram():
     bot.infinity_polling(timeout=20)
 
 if __name__ == '__main__':
-    # Se encarga de crear las tablas fijas en Supabase si no existen
     inicializar_base_datos()
     
     hilo_bot = threading.Thread(target=correr_bot_telegram)
