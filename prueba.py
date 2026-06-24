@@ -1,5 +1,6 @@
 import threading
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import time
 import random
 import os
@@ -14,73 +15,85 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
 URL_MINI_APP = 'https://glistening-buttercream-e53584.netlify.app/' 
-DATABASE = 'flowerlan_db.db'
 ADMIN_ID = 6808824866 
+
+# Pegamos tu URL definitiva de Supabase sin los corchetes
+DATABASE_URL = "postgresql://postgres:72bGmBxf6qzb-iY@db.rsqcsdheaibeuhjbxicn.supabase.co:5432/postgres"
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
 CORS(app)
 
 # ==========================================
-# GESTIÓN DE BASE DE DATOS
+# GESTIÓN DE BASE DE DATOS (POSTGRESQL)
 # ==========================================
 def conectar_db():
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row 
+    # Nos conectamos a la nube de Supabase usando RealDictCursor para mantener la lectura por nombre de columna
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def inicializar_base_datos():
     conn = conectar_db()
     cursor = conn.cursor()
     
+    # 1. Tabla Usuarios (Cambio de tipos a BIGINT para IDs de Telegram)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
-            telegram_id INTEGER PRIMARY KEY,
+            telegram_id BIGINT PRIMARY KEY,
             nombre TEXT,
             username TEXT,
-            saldo_usdt REAL DEFAULT 0.0,
-            saldo_lan REAL DEFAULT 1250.0
+            saldo_usdt NUMERIC DEFAULT 0.0,
+            saldo_lan NUMERIC DEFAULT 1250.0
         )
     ''')
+    
+    # 2. Tabla Inventario
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventario (
-            telegram_id INTEGER,
+            telegram_id BIGINT,
             item_tipo TEXT, 
             cantidad INTEGER DEFAULT 0,
             PRIMARY KEY (telegram_id, item_tipo)
         )
     ''')
+    
+    # 3. Tabla Plantas (AUTOINCREMENT cambia por SERIAL)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS plantas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT,
             rareza TEXT, 
-            produccion_hora REAL,
+            produccion_hora NUMERIC,
             tiempo_inicio TEXT, 
             estado TEXT DEFAULT 'CRECIENDO' 
         )
     ''')
+    
+    # 4. Tabla Mercado
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mercado (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             planta_id INTEGER,
-            vendedor_id INTEGER,
-            precio REAL,
+            vendedor_id BIGINT,
+            precio NUMERIC,
             fecha_publicacion TEXT
         )
     ''')
+    
+    # 5. Tabla Transacciones
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            telegram_id BIGINT,
             tipo TEXT,
-            monto REAL,
+            monto NUMERIC,
             estado TEXT DEFAULT 'PENDIENTE',
             fecha_solicitud TEXT
         )
     ''')
     
     conn.commit()
+    cursor.close()
     conn.close()
 
 # ==========================================
@@ -95,17 +108,26 @@ def enviar_bienvenida(message):
         
         conn = conectar_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id FROM usuarios WHERE telegram_id = ?", (user_id,))
+        cursor.execute("SELECT telegram_id FROM usuarios WHERE telegram_id = %s", (user_id,))
         existe = cursor.fetchone()
 
         if not existe:
             cursor.execute(
-                "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (?, ?, ?, 0.0, 1250.0)",
+                "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (%s, %s, %s, 0.0, 1250.0)",
                 (user_id, first_name, username)
             )
-            cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, cantidad) VALUES (?, 'maceta_grande', 2)", (user_id,))
-            cursor.execute("INSERT OR IGNORE INTO inventario (telegram_id, item_tipo, cantidad) VALUES (?, 'agua', 5)", (user_id,))
+            # Adaptación para Postgres (ON CONFLICT DO NOTHING reemplaza a INSERT OR IGNORE)
+            cursor.execute("""
+                INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES (%s, 'maceta_grande', 2)
+                ON CONFLICT (telegram_id, item_tipo) DO NOTHING
+            """, (user_id,))
+            cursor.execute("""
+                INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES (%s, 'agua', 5)
+                ON CONFLICT (telegram_id, item_tipo) DO NOTHING
+            """, (user_id,))
             conn.commit()
+        
+        cursor.close()
         conn.close()
 
         markup = InlineKeyboardMarkup(row_width=2)
@@ -143,9 +165,11 @@ def manejar_botones(call):
 def mostrar_panel_admin(chat_id):
     try:
         conn = conectar_db()
-        cursor = conn.cursor()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SELECT id, telegram_id, tipo, monto FROM transacciones WHERE estado = 'PENDIENTE'")
         pendientes = cursor.fetchall()
+        
+        cursor.close()
         conn.close()
         
         if not pendientes:
@@ -157,7 +181,6 @@ def mostrar_panel_admin(chat_id):
         bot.send_message(chat_id, f"📥 ¡Tienes {len(pendientes)} solicitudes pendientes por revisar!")
         
         for tx in pendientes:
-            # FIX: Extracción segura por nombre de columna
             tx_id = tx['id']
             u_id = tx['telegram_id']
             tipo = tx['tipo']
@@ -173,13 +196,13 @@ def mostrar_panel_admin(chat_id):
 def gestionar_transaccion_admin(tx_id, accion, message_obj):
     try:
         conn = conectar_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id, tipo, monto, estado FROM transacciones WHERE id = ?", (tx_id,))
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT telegram_id, tipo, monto, estado FROM transacciones WHERE id = %s", (tx_id,))
         tx = cursor.fetchone()
         
-        # FIX: Acceso por nombre de columna para evitar caídas en Row
         if not tx or tx['estado'] != 'PENDIENTE':
             bot.edit_message_text("⚠️ Ya procesada o inexistente.", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
+            cursor.close()
             conn.close()
             return
             
@@ -189,11 +212,11 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
         
         if accion == "aprob":
             if tipo == "RECARGA":
-                cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt + ? WHERE telegram_id = ?", (monto, u_id))
+                cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt + %s WHERE telegram_id = %s", (monto, u_id))
             elif tipo == "RETIRO":
-                cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt - ? WHERE telegram_id = ?", (monto, u_id))
+                cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt - %s WHERE telegram_id = %s", (monto, u_id))
             
-            cursor.execute("UPDATE transacciones SET estado = 'APROBADO' WHERE id = ?", (tx_id,))
+            cursor.execute("UPDATE transacciones SET estado = 'APROBADO' WHERE id = %s", (tx_id,))
             conn.commit()
             
             try:
@@ -201,7 +224,7 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
             except: pass
             bot.edit_message_text(f"✅ #{tx_id} APROBADA", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
         else:
-            cursor.execute("UPDATE transacciones SET estado = 'RECHAZADO' WHERE id = ?", (tx_id,))
+            cursor.execute("UPDATE transacciones SET estado = 'RECHAZADO' WHERE id = %s", (tx_id,))
             conn.commit()
             
             try:
@@ -209,6 +232,7 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
             except: pass
             bot.edit_message_text(f"❌ #{tx_id} RECHAZADA", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
             
+        cursor.close()
         conn.close()
     except Exception as e:
         print(f"Error gestionando transacción: {e}")
@@ -226,20 +250,22 @@ def obtener_perfil():
     user_id = request.args.get('id')
     conn = conectar_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT saldo_usdt, saldo_lan FROM usuarios WHERE telegram_id = ?", (user_id,))
+    cursor.execute("SELECT saldo_usdt, saldo_lan FROM usuarios WHERE telegram_id = %s", (user_id,))
     data = cursor.fetchone()
+    cursor.close()
     conn.close()
     if data:
-        return jsonify({"usdt": data[0], "lan": data[1]})
+        return jsonify({"usdt": float(data[0]), "lan": float(data[1])})
     return jsonify({"error": "Usuario no registrado"}), 404
 
 @app.route('/obtener_inventario', methods=['GET'])
 def obtener_inventario():
     user_id = request.args.get('id')
     conn = conectar_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = ?", (user_id,))
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = %s", (user_id,))
     items = {row['item_tipo']: row['cantidad'] for row in cursor.fetchall()}
+    cursor.close()
     conn.close()
     return jsonify(items)
 
@@ -266,24 +292,27 @@ def comprar_item():
     costo_total = precios[item] * cantidad
     
     conn = conectar_db()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    cursor.execute("SELECT saldo_lan FROM usuarios WHERE telegram_id = ?", (user_id,))
+    cursor.execute("SELECT saldo_lan FROM usuarios WHERE telegram_id = %s", (user_id,))
     user = cursor.fetchone()
-    if not user or user['saldo_lan'] < costo_total:
+    if not user or float(user['saldo_lan']) < costo_total:
+        cursor.close()
         conn.close()
         return jsonify({"error": "Saldo $LAN insuficiente"}), 400
         
-    cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - ? WHERE telegram_id = ?", (costo_total, user_id))
+    cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - %s WHERE telegram_id = %s", (costo_total, user_id))
     
+    # Adaptación para Postgres (Sintaxis ON CONFLICT)
     cursor.execute("""
         INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
-        VALUES (?, ?, ?) 
-        ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = cantidad + ?
+        VALUES (%s, %s, %s) 
+        ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
     """, (user_id, item, cantidad, cantidad))
     
     conn.commit()
-    nuevo_saldo = user['saldo_lan'] - costo_total
+    nuevo_saldo = float(user['saldo_lan']) - costo_total
+    cursor.close()
     conn.close()
     
     return jsonify({"mensaje": "Compra exitosa", "nuevo_saldo": nuevo_saldo})
@@ -304,14 +333,15 @@ def solicitar_recarga_web():
     cursor = conn.cursor()
     
     fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (?, ?, ?, ?)", 
+    # Se usa RETURNING id en Postgres para obtener el id recién creado de la transacción
+    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (%s, %s, %s, %s) RETURNING id", 
                    (user_id, "RECARGA", monto, fecha_actual))
-    tx_id = cursor.lastrowid
+    tx_id = cursor.fetchone()[0]
     conn.commit()
+    cursor.close()
     conn.close()
     
     try:
-        # FIX: Envía la alerta directa con botones interactivos al Admin
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✅ Aprobar", callback_data=f"aprob_{tx_id}"),
                    InlineKeyboardButton("❌ Rechazar", callback_data=f"rech_{tx_id}"))
@@ -334,24 +364,25 @@ def solicitar_retiro_web():
         return jsonify({"error": "Monto inválido"}), 400
 
     conn = conectar_db()
-    cursor = conn.cursor()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = ?", (user_id,))
+    cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = %s", (user_id,))
     user = cursor.fetchone()
     
-    if not user or user['saldo_usdt'] < monto:
+    if not user or float(user['saldo_usdt']) < monto:
+        cursor.close()
         conn.close()
         return jsonify({"error": "Saldo USDT insuficiente"}), 400
 
     fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (?, ?, ?, ?)", 
+    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (%s, %s, %s, %s) RETURNING id", 
                    (user_id, "RETIRO", monto, fecha_actual))
-    tx_id = cursor.lastrowid
+    tx_id = cursor.fetchone()[0]
     conn.commit()
+    cursor.close()
     conn.close()
     
     try:
-        # FIX: Envía la alerta directa con botones interactivos al Admin
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✅ Aprobar", callback_data=f"aprob_{tx_id}"),
                    InlineKeyboardButton("❌ Rechazar", callback_data=f"rech_{tx_id}"))
@@ -369,6 +400,7 @@ def correr_bot_telegram():
     bot.infinity_polling(timeout=20)
 
 if __name__ == '__main__':
+    # Se encarga de crear las tablas fijas en Supabase si no existen
     inicializar_base_datos()
     
     hilo_bot = threading.Thread(target=correr_bot_telegram)
@@ -378,4 +410,3 @@ if __name__ == '__main__':
     puerto = int(os.environ.get("PORT", 10000))
     print(f"🚀 Servidor FlowerLan activo en puerto: {puerto}")
     app.run(host='0.0.0.0', port=puerto, debug=False, use_reloader=False)
-
