@@ -13,8 +13,8 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # CONFIGURACIÓN INICIAL
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
-URL_MINI_APP = 'https://dashing-quokka-8dcbf8.netlify.app/' 
-DATABASE = '/data/flowerlan_db.db'
+URL_MINI_APP = 'https://glistening-buttercream-e53584.netlify.app/' 
+DATABASE = 'flowerlan_db.db'
 ADMIN_ID = 6808824866 
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
