@@ -18,7 +18,8 @@ URL_MINI_APP = 'https://glistening-buttercream-e53584.netlify.app/'
 ADMIN_ID = 6808824866 
 
 # Pegamos tu URL definitiva de Supabase sin los corchetes
-DATABASE_URL = "postgresql://postgres:72bGmBxf6qzb-iY@db.rsqcsdheaibeuhjbxicn.supabase.co:5432/postgres"
+DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:72bGmBxf6qzb-iY@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
