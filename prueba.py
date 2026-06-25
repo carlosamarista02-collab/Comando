@@ -4,7 +4,7 @@ from psycopg2.extras import RealDictCursor
 import time
 import random
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import telebot
@@ -313,6 +313,35 @@ def obtener_inventario():
     conn.close()
     return jsonify(items)
 
+# =====================================================
+# NUEVO ENDPOINT: Obtener Tierras y Slots (AGREGADO)
+# =====================================================
+@app.route('/obtener_tierras', methods=['GET'])
+def obtener_tierras():
+    user_id = request.args.get('id')
+    conn = conectar_db()
+    if not conn: return jsonify({"slots_totales": 0, "tierras": []}), 500
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cursor.execute("SELECT tierras_compradas FROM usuarios WHERE telegram_id = %s", (user_id,))
+    data = cursor.fetchone()
+    
+    if not data: 
+        cursor.close(); conn.close()
+        return jsonify({"slots_totales": 4, "tierras": []}), 200
+        
+    tierras = data['tierras_compradas'] or []
+    mapa_slots = {'comun': 4, 'rara': 8, 'legendaria': 12}
+    slots_extra = sum(mapa_slots.get(t, 0) for t in tierras)
+    slots_base = 4 
+    
+    cursor.close()
+    conn.close()
+    return jsonify({
+        "slots_totales": slots_base + slots_extra,
+        "tierras": tierras
+    })
+
 @app.route('/comprar_item', methods=['POST'])
 def comprar_item():
     datos = request.json
@@ -361,12 +390,22 @@ def comprar_item():
     
     # 3. Agregar Item
     if 'tierra' in item_key:
-        # Lógica especial para tierras (Slots)
-        # Aquí podríamos guardar en una tabla de 'tierras_usuario', pero por simplicidad
-        # lo manejamos como un item especial o simplemente notificamos al frontend que añada el slot visualmente.
-        # Para persistencia real, deberíamos tener una tabla 'tierras'.
-        # Por ahora, asumimos que el frontend añade el slot visualmente y guardamos un registro simple.
-        pass 
+        # ==========================================
+        # CORREGIDO: Ahora guarda la tierra correctamente
+        # ==========================================
+        tipo_tierra_map = {
+            'tierra_comun': 'comun',
+            'tierra_rara': 'rara', 
+            'tierra_legendaria': 'legendaria'
+        }
+        tipo_db = tipo_tierra_map.get(item_key)
+        
+        if tipo_db:
+            cursor.execute("""
+                UPDATE usuarios 
+                SET tierras_compradas = COALESCE(tierras_compradas, '[]'::jsonb) || %s::jsonb
+                WHERE telegram_id = %s
+            """, ([tipo_db], user_id))
     else:
         # Items normales (Macetas, Agua, Semillas)
         cursor.execute("""
@@ -380,7 +419,109 @@ def comprar_item():
     cursor.close()
     conn.close()
     
+    # ==========================================
+    # CORREGIDO: Siempre retornar nuevo_saldo
+    # ==========================================
     return jsonify({"mensaje": "Compra exitosa", "nuevo_saldo": nuevo_saldo})
+
+# =====================================================
+# NUEVO ENDPOINT: Germinación de Semillas (AGREGADO)
+# =====================================================
+@app.route('/germinar_semillas', methods=['POST'])
+def germinar_semillas():
+    datos = request.json
+    user_id = datos.get('id')
+    cantidad = int(datos.get('cantidad', 1))
+    
+    conn = conectar_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # 1. Verificar recursos necesarios (Maceta Esp + Agua + Fertilizante)
+    cursor.execute("""
+        SELECT cantidad FROM inventario 
+        WHERE telegram_id = %s AND item_tipo IN ('maceta_especial', 'agua', 'fertilizante_pro')
+    """, (user_id,))
+    inv = {row['item_tipo']: row['cantidad'] for row in cursor.fetchall()}
+    
+    req_maceta = inv.get('maceta_especial', 0) >= cantidad
+    req_agua = inv.get('agua', 0) >= (cantidad * 2)  # HTML dice 2 gotas
+    req_fert = inv.get('fertilizante_pro', 0) >= cantidad
+    
+    if not (req_maceta and req_agua and req_fert):
+        cursor.close(); conn.close()
+        return jsonify({"error": "Recursos insuficientes"}), 400
+    
+    # 2. Descontar recursos
+    cursor.execute("""
+        UPDATE inventario SET cantidad = cantidad - %s 
+        WHERE telegram_id = %s AND item_tipo = 'maceta_especial'
+    """, (cantidad, user_id))
+    cursor.execute("""
+        UPDATE inventario SET cantidad = cantidad - %s 
+        WHERE telegram_id = %s AND item_tipo = 'agua'
+    """, (cantidad * 2, user_id))
+    cursor.execute("""
+        UPDATE inventario SET cantidad = cantidad - %s 
+        WHERE telegram_id = %s AND item_tipo = 'fertilizante_pro'
+    """, (cantidad, user_id))
+    
+    # 3. Crear plantas activas (Rareza aleatoria según HTML)
+    rarezas = ['COMÚN', 'RARO', 'ÉPICO', 'LEGENDARIO']
+    pesos = [60, 25, 10, 5]  # Probabilidades
+    for _ in range(cantidad):
+        rareza = random.choices(rarezas, weights=pesos, k=1)[0]
+        prod_hora = {'COMÚN': 5, 'RARO': 15, 'ÉPICO': 50, 'LEGENDARIO': 200}[rareza]
+        duracion = 24  # Horas según HTML
+        
+        cursor.execute("""
+            INSERT INTO plantas_activas (telegram_id, nombre_planta, rareza, produccion_hora, duracion_horas, estado)
+            VALUES (%s, %s, %s, %s, %s, 'CRECIENDO')
+        """, (user_id, f"Planta {rareza}", rareza, prod_hora, duracion))
+    
+    conn.commit()
+    cursor.close(); conn.close()
+    return jsonify({"mensaje": "Germinación exitosa"})
+
+# =====================================================
+# NUEVO ENDPOINT: Cosecha de Plantas (AGREGADO)
+# =====================================================
+@app.route('/cosechar', methods=['POST'])
+def cosechar():
+    datos = request.json
+    user_id = datos.get('id')
+    planta_id = datos.get('planta_id')
+    
+    conn = conectar_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Verificar que la planta esté lista
+    cursor.execute("""
+        SELECT * FROM plantas_activas 
+        WHERE id = %s AND telegram_id = %s AND estado = 'LISTO_PARA_COSCHA'
+    """, (planta_id, user_id))
+    planta = cursor.fetchone()
+    
+    if not planta:
+        cursor.close(); conn.close()
+        return jsonify({"error": "Planta no lista"}), 400
+    
+    # Sumar recompensa
+    cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan + %s WHERE telegram_id = %s", 
+                   (planta['produccion_hora'] * planta['duracion_horas'], user_id))
+    
+    # Eliminar planta activa
+    cursor.execute("DELETE FROM plantas_activas WHERE id = %s", (planta_id,))
+    
+    # Devolver maceta al almacén (según HTML: "La planta vuelve al almacén")
+    cursor.execute("""
+        INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
+        VALUES (%s, 'maceta_grande', 1) 
+        ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
+    """, (user_id,))
+    
+    conn.commit()
+    cursor.close(); conn.close()
+    return jsonify({"mensaje": "Cosecha completada"})
 
 @app.route('/solicitar_recarga_web', methods=['POST'])
 def solicitar_recarga_web():
@@ -415,7 +556,7 @@ def solicitar_recarga_web():
     except Exception as e:
         print(f"Error enviando notif admin: {e}")
         
-    return jsonify({"mensaje": "Solicitud enviada"})
+    return jsonify({"mensaje": "Solicitud enviada", "tx_id": tx_id})
 
 @app.route('/solicitar_retiro_web', methods=['POST'])
 def solicitar_retiro_web():
@@ -459,7 +600,7 @@ def solicitar_retiro_web():
     except Exception as e:
         print(f"Error enviando notif admin: {e}")
         
-    return jsonify({"mensaje": "Solicitud de retiro enviada"})
+    return jsonify({"mensaje": "Solicitud de retiro enviada", "tx_id": tx_id})
 
 # ==========================================
 # ARRANQUE
