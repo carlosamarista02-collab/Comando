@@ -14,7 +14,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # CONFIGURACIÓN INICIAL
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
-URL_MINI_APP = 'https://dazzling-yeot-448a09.netlify.app/' 
+URL_MINI_APP = 'https://lucent-moonbeam-09dd4d.netlify.app/' 
 ADMIN_ID = 6808824866 
 
 # URL definitiva usando el Transaction Pooler (IPv4 compatible con Render)
@@ -28,23 +28,31 @@ CORS(app)
 # GESTIÓN DE BASE DE DATOS (POSTGRESQL)
 # ==========================================
 def conectar_db():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        print(f"[DB ERROR] Conexión fallida: {e}")
+        return None
 
 def inicializar_base_datos():
     conn = conectar_db()
+    if not conn: return
     cursor = conn.cursor()
     
+    # Tabla Usuarios
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usuarios (
             telegram_id BIGINT PRIMARY KEY,
             nombre TEXT,
             username TEXT,
             saldo_usdt NUMERIC DEFAULT 0.0,
-            saldo_lan NUMERIC DEFAULT 1250.0
+            saldo_lan NUMERIC DEFAULT 1250.0,
+            tierras_compradas JSONB DEFAULT '[]'::jsonb -- Guarda IDs de tierras extra compradas
         )
     ''')
     
+    # Tabla Inventario (Items consumibles y plantas base)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventario (
             telegram_id BIGINT,
@@ -54,44 +62,55 @@ def inicializar_base_datos():
         )
     ''')
     
+    # Tabla Plantas Activas (En crecimiento)
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS plantas (
+        CREATE TABLE IF NOT EXISTS plantas_activas (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
+            nombre_planta TEXT,
             rareza TEXT, 
             produccion_hora NUMERIC,
-            tiempo_inicio TEXT, 
-            estado TEXT DEFAULT 'CRECIENDO' 
+            tiempo_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            duracion_horas INTEGER,
+            estado TEXT DEFAULT 'CRECIENDO',
+            recursos JSONB -- Guarda maceta/agua usada
         )
     ''')
     
+    # Tabla Mercado P2P
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS mercado (
             id SERIAL PRIMARY KEY,
-            planta_id INTEGER,
             vendedor_id BIGINT,
+            nombre_item TEXT,
+            icono TEXT,
+            rareza TEXT,
             precio NUMERIC,
-            fecha_publicacion TEXT
+            produccion_hora NUMERIC,
+            fecha_publicacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
+    # Tabla Transacciones (Recargas/Retiros)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacciones (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
-            tipo TEXT,
+            tipo TEXT, -- 'RECARGA' o 'RETIRO'
             monto NUMERIC,
-            estado TEXT DEFAULT 'PENDIENTE',
-            fecha_solicitud TEXT
+            wallet_address TEXT, -- Para retiros
+            estado TEXT DEFAULT 'PENDIENTE', -- PENDIENTE, APROBADO, RECHAZADO
+            fecha_solicitud TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
     conn.commit()
     cursor.close()
     conn.close()
+    print("[DB] Base de datos inicializada correctamente.")
 
 # ==========================================
-# LÓGICA DEL BOT DE TELEGRAM (ENTRADA DIRECTA)
+# LÓGICA DEL BOT DE TELEGRAM
 # ==========================================
 @bot.message_handler(commands=['start'])
 def enviar_bienvenida(message):
@@ -101,7 +120,10 @@ def enviar_bienvenida(message):
         username = message.from_user.username or ''
         
         conn = conectar_db()
+        if not conn: return
         cursor = conn.cursor()
+        
+        # Verificar si existe
         cursor.execute("SELECT telegram_id FROM usuarios WHERE telegram_id = %s", (user_id,))
         existe = cursor.fetchone()
 
@@ -110,20 +132,19 @@ def enviar_bienvenida(message):
                 "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (%s, %s, %s, 0.0, 1250.0)",
                 (user_id, first_name, username)
             )
+            # Regalo de bienvenida
             cursor.execute("""
-                INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES (%s, 'maceta_grande', 2)
-                ON CONFLICT (telegram_id, item_tipo) DO NOTHING
-            """, (user_id,))
-            cursor.execute("""
-                INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES (%s, 'agua', 5)
-                ON CONFLICT (telegram_id, item_tipo) DO NOTHING
-            """, (user_id,))
+                INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES 
+                (%s, 'maceta_grande', 2),
+                (%s, 'agua', 5)
+                ON CONFLICT (telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
+            """, (user_id, user_id))
+            
             conn.commit()
         
         cursor.close()
         conn.close()
 
-        # El menú se genera de forma limpia, sin intermediarios de canales externos
         markup = InlineKeyboardMarkup(row_width=2)
         boton_jugar = InlineKeyboardButton(text="🚀 Jugar FlowerLan", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP))
         
@@ -133,7 +154,7 @@ def enviar_bienvenida(message):
         else:
             markup.add(boton_jugar)
 
-        bot.send_message(message.chat.id, f"¡Hola {first_name}! Bienvenido a FlowerLan 🌻\nUsa la Mini App para gestionar tus fondos.", reply_markup=markup)
+        bot.send_message(message.chat.id, f"¡Hola {first_name}! Bienvenido a FlowerLan 🌻\nToca el botón para entrar a tu granja.", reply_markup=markup)
     except Exception as e:
         print(f"[BOT ERROR] Error en start: {e}")
 
@@ -151,16 +172,19 @@ def manejar_botones(call):
 
         elif call.data.startswith("aprob_") or call.data.startswith("rech_"):
             if user_id != ADMIN_ID: return
-            accion, tx_id = call.data.split("_")
-            gestionar_transaccion_admin(int(tx_id), accion, call.message)
+            partes = call.data.split("_")
+            accion = partes[0]
+            tx_id = int(partes[1])
+            gestionar_transaccion_admin(tx_id, accion, call.message)
     except Exception as e:
         print(f"[BOT ERROR] Error en manejar_botones: {e}")
 
 def mostrar_panel_admin(chat_id):
     try:
         conn = conectar_db()
+        if not conn: return
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT id, telegram_id, tipo, monto FROM transacciones WHERE estado = 'PENDIENTE'")
+        cursor.execute("SELECT id, telegram_id, tipo, monto, wallet_address FROM transacciones WHERE estado = 'PENDIENTE' ORDER BY id DESC")
         pendientes = cursor.fetchall()
         
         cursor.close()
@@ -168,61 +192,81 @@ def mostrar_panel_admin(chat_id):
         
         if not pendientes:
             markup_vacio = InlineKeyboardMarkup()
-            markup_vacio.add(InlineKeyboardButton("🔄 Verificar de nuevo", callback_data="panel_admin"))
-            bot.send_message(chat_id, "⚙️ **Panel de Administración** ⚙️\n\n✅ Al día: No hay solicitudes de retiro o recarga pendientes.", parse_mode="Markdown", reply_markup=markup_vacio)
+            markup_vacio.add(InlineKeyboardButton("🔄 Actualizar", callback_data="panel_admin"))
+            bot.send_message(chat_id, "⚙️ **Panel de Administración** ⚙️\n\n✅ Todo al día. No hay solicitudes pendientes.", parse_mode="Markdown", reply_markup=markup_vacio)
             return
             
-        bot.send_message(chat_id, f"📥 ¡Tienes {len(pendientes)} solicitudes pendientes por revisar!")
+        bot.send_message(chat_id, f"📥 Tienes {len(pendientes)} solicitudes pendientes:")
         
         for tx in pendientes:
             tx_id = tx['id']
             u_id = tx['telegram_id']
             tipo = tx['tipo']
             monto = tx['monto']
+            wallet = tx.get('wallet_address', 'N/A')
             
             markup = InlineKeyboardMarkup()
             markup.row(InlineKeyboardButton("✅ Aprobar", callback_data=f"aprob_{tx_id}"),
                        InlineKeyboardButton("❌ Rechazar", callback_data=f"rech_{tx_id}"))
-            bot.send_message(chat_id, f"📥 **ID Transacción:** #{tx_id}\n👤 **User ID:** `{u_id}`\n📋 **Tipo:** {tipo}\n💰 **Monto:** {monto} USDT", parse_mode="Markdown", reply_markup=markup)
+            
+            msg_text = f"📥 **ID Transacción:** #{tx_id}\n👤 **User ID:** `{u_id}`\n📋 **Tipo:** {tipo}\n💰 **Monto:** {monto} USDT"
+            if tipo == 'RETIRO':
+                msg_text += f"\n🏦 **Wallet:** `{wallet}`"
+                
+            bot.send_message(chat_id, msg_text, parse_mode="Markdown", reply_markup=markup)
     except Exception as e:
         print(f"Error mostrando panel: {e}")
 
 def gestionar_transaccion_admin(tx_id, accion, message_obj):
     try:
         conn = conectar_db()
+        if not conn: return
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT telegram_id, tipo, monto, estado FROM transacciones WHERE id = %s", (tx_id,))
+        
+        # Bloquear fila para evitar doble gasto
+        cursor.execute("SELECT * FROM transacciones WHERE id = %s FOR UPDATE", (tx_id,))
         tx = cursor.fetchone()
         
         if not tx or tx['estado'] != 'PENDIENTE':
-            bot.edit_message_text("⚠️ Ya procesada o inexistente.", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
+            bot.edit_message_text("⚠️ Esta solicitud ya fue procesada.", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
             cursor.close()
             conn.close()
             return
             
         u_id = tx['telegram_id']
         tipo = tx['tipo']
-        monto = tx['monto']
+        monto = float(tx['monto'])
         
         if accion == "aprob":
             if tipo == "RECARGA":
                 cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt + %s WHERE telegram_id = %s", (monto, u_id))
             elif tipo == "RETIRO":
-                cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt - %s WHERE telegram_id = %s", (monto, u_id))
-            
+                # Verificar saldo nuevamente antes de aprobar
+                cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = %s", (u_id,))
+                user_data = cursor.fetchone()
+                if user_data and float(user_data['saldo_usdt']) >= monto:
+                    cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt - %s WHERE telegram_id = %s", (monto, u_id))
+                else:
+                    bot.send_message(message_obj.chat.id, f"❌ Error: El usuario {u_id} ya no tiene saldo suficiente.")
+                    cursor.execute("UPDATE transacciones SET estado = 'RECHAZADO_SALDO' WHERE id = %s", (tx_id,))
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    return
+
             cursor.execute("UPDATE transacciones SET estado = 'APROBADO' WHERE id = %s", (tx_id,))
             conn.commit()
             
             try:
-                bot.send_message(u_id, f"🎉 Tu solicitud de {monto} USDT fue aprobada.")
+                bot.send_message(u_id, f"🎉 ¡Felicidades! Tu solicitud de {monto} USDT ({tipo}) ha sido **APROBADA**.", parse_mode="Markdown")
             except: pass
-            bot.edit_message_text(f"✅ #{tx_id} APROBADA", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
+            bot.edit_message_text(f"✅ #{tx_id} APROBADA CORRECTAMENTE", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
         else:
             cursor.execute("UPDATE transacciones SET estado = 'RECHAZADO' WHERE id = %s", (tx_id,))
             conn.commit()
             
             try:
-                bot.send_message(u_id, f"❌ Tu solicitud de {monto} USDT fue rechazada.")
+                bot.send_message(u_id, f"❌ Tu solicitud de {monto} USDT ha sido rechazada por el administrador.")
             except: pass
             bot.edit_message_text(f"❌ #{tx_id} RECHAZADA", chat_id=message_obj.chat.id, message_id=message_obj.message_id)
             
@@ -232,22 +276,27 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
         print(f"Error gestiónando transacción: {e}")
 
 # ==========================================
-# API FLASK PARA LA MINI APP
+# API FLASK PARA LA MINI APP (FRONTEND)
 # ==========================================
 @app.after_request
 def evitar_cache(response):
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
 @app.route('/obtener_perfil', methods=['GET'])
 def obtener_perfil():
     user_id = request.args.get('id')
+    if not user_id: return jsonify({"error": "Falta ID"}), 400
+    
     conn = conectar_db()
+    if not conn: return jsonify({"error": "DB Error"}), 500
     cursor = conn.cursor()
     cursor.execute("SELECT saldo_usdt, saldo_lan FROM usuarios WHERE telegram_id = %s", (user_id,))
     data = cursor.fetchone()
     cursor.close()
     conn.close()
+    
     if data:
         return jsonify({"usdt": float(data[0]), "lan": float(data[1])})
     return jsonify({"error": "Usuario no registrado"}), 404
@@ -256,8 +305,9 @@ def obtener_perfil():
 def obtener_inventario():
     user_id = request.args.get('id')
     conn = conectar_db()
+    if not conn: return jsonify({}), 500
     cursor = conn.cursor(cursor_factory=RealDictCursor)
-    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = %s", (user_id,))
+    cursor.execute("SELECT item_tipo, cantidad FROM inventario WHERE telegram_id = %s AND cantidad > 0", (user_id,))
     items = {row['item_tipo']: row['cantidad'] for row in cursor.fetchall()}
     cursor.close()
     conn.close()
@@ -267,41 +317,63 @@ def obtener_inventario():
 def comprar_item():
     datos = request.json
     user_id = datos.get('id')
-    item = datos.get('item')
+    item_key = datos.get('item') # Ej: 'maceta_grande', 'agua', 'tierra_comun'
+    
     try:
         cantidad = int(datos.get('cantidad', 1))
         if cantidad <= 0: raise ValueError
     except:
         return jsonify({"error": "Cantidad inválida"}), 400
     
+    # Precios definidos en el Frontend
     precios = {
-        'maceta_grande': 50, 'agua': 10, 'semilla_misteriosa': 100,
-        'maceta_especial': 200, 'fertilizante': 150,
-        'granja_comun': 50, 'granja_rara': 150, 'granja_legendaria': 300
+        'maceta_grande': 20, 
+        'agua': 5, 
+        'semilla_misteriosa': 100,
+        'maceta_especial': 50, 
+        'fertilizante_pro': 75,
+        'tierra_comun': 50, 
+        'tierra_rara': 150, 
+        'tierra_legendaria': 300
     }
     
-    if item not in precios:
+    if item_key not in precios:
         return jsonify({"error": "Item no válido"}), 400
         
-    costo_total = precios[item] * cantidad
+    costo_unitario = precios[item_key]
+    costo_total = costo_unitario * cantidad
     
     conn = conectar_db()
+    if not conn: return jsonify({"error": "DB Error"}), 500
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
+    # 1. Verificar Saldo
     cursor.execute("SELECT saldo_lan FROM usuarios WHERE telegram_id = %s", (user_id,))
     user = cursor.fetchone()
+    
     if not user or float(user['saldo_lan']) < costo_total:
         cursor.close()
         conn.close()
         return jsonify({"error": "Saldo $LAN insuficiente"}), 400
         
+    # 2. Descontar Saldo
     cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - %s WHERE telegram_id = %s", (costo_total, user_id))
     
-    cursor.execute("""
-        INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
-        VALUES (%s, %s, %s) 
-        ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
-    """, (user_id, item, cantidad, cantidad))
+    # 3. Agregar Item
+    if 'tierra' in item_key:
+        # Lógica especial para tierras (Slots)
+        # Aquí podríamos guardar en una tabla de 'tierras_usuario', pero por simplicidad
+        # lo manejamos como un item especial o simplemente notificamos al frontend que añada el slot visualmente.
+        # Para persistencia real, deberíamos tener una tabla 'tierras'.
+        # Por ahora, asumimos que el frontend añade el slot visualmente y guardamos un registro simple.
+        pass 
+    else:
+        # Items normales (Macetas, Agua, Semillas)
+        cursor.execute("""
+            INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
+            VALUES (%s, %s, %s) 
+            ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
+        """, (user_id, item_key, cantidad))
     
     conn.commit()
     nuevo_saldo = float(user['saldo_lan']) - costo_total
@@ -323,9 +395,10 @@ def solicitar_recarga_web():
         return jsonify({"error": "Monto inválido"}), 400
 
     conn = conectar_db()
+    if not conn: return jsonify({"error": "DB Error"}), 500
     cursor = conn.cursor()
     
-    fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    fecha_actual = datetime.now()
     cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (%s, %s, %s, %s) RETURNING id", 
                    (user_id, "RECARGA", monto, fecha_actual))
     tx_id = cursor.fetchone()[0]
@@ -333,21 +406,23 @@ def solicitar_recarga_web():
     cursor.close()
     conn.close()
     
+    # Notificar al Admin
     try:
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✅ Aprobar", callback_data=f"aprob_{tx_id}"),
                    InlineKeyboardButton("❌ Rechazar", callback_data=f"rech_{tx_id}"))
-        bot.send_message(ADMIN_ID, f"🔔 **NUEVA RECARGA PENDIENTE (DESDE WEB)**\n\n📥 **ID:** #{tx_id}\n👤 **Usuario:** `{user_id}`\n💰 **Monto:** {monto} USDT", parse_mode="Markdown", reply_markup=markup)
-    except:
-        pass 
+        bot.send_message(ADMIN_ID, f"🔔 **NUEVA RECARGA (WEB)**\n\n🆔 ID: #{tx_id}\n👤 User: `{user_id}`\n💰 Monto: {monto} USDT", parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        print(f"Error enviando notif admin: {e}")
         
-    return jsonify({"mensaje": "Solicitud enviada. Espera la aprobación del admin."})
+    return jsonify({"mensaje": "Solicitud enviada"})
 
 @app.route('/solicitar_retiro_web', methods=['POST'])
 def solicitar_retiro_web():
     datos = request.json
     user_id = datos.get('id')
     monto_str = str(datos.get('monto')).replace(',', '.')
+    wallet = datos.get('walletAddress', 'No especificada')
     
     try:
         monto = float(monto_str)
@@ -356,8 +431,10 @@ def solicitar_retiro_web():
         return jsonify({"error": "Monto inválido"}), 400
 
     conn = conectar_db()
+    if not conn: return jsonify({"error": "DB Error"}), 500
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
+    # Verificar saldo antes de crear solicitud
     cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = %s", (user_id,))
     user = cursor.fetchone()
     
@@ -366,9 +443,9 @@ def solicitar_retiro_web():
         conn.close()
         return jsonify({"error": "Saldo USDT insuficiente"}), 400
 
-    fecha_actual = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, fecha_solicitud) VALUES (%s, %s, %s, %s) RETURNING id", 
-                   (user_id, "RETIRO", monto, fecha_actual))
+    fecha_actual = datetime.now()
+    cursor.execute("INSERT INTO transacciones (telegram_id, tipo, monto, wallet_address, fecha_solicitud) VALUES (%s, %s, %s, %s, %s) RETURNING id", 
+                   (user_id, "RETIRO", monto, wallet, fecha_actual))
     tx_id = cursor.fetchone()[0]
     conn.commit()
     cursor.close()
@@ -378,17 +455,17 @@ def solicitar_retiro_web():
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✅ Aprobar", callback_data=f"aprob_{tx_id}"),
                    InlineKeyboardButton("❌ Rechazar", callback_data=f"rech_{tx_id}"))
-        bot.send_message(ADMIN_ID, f"🔔 **NUEVO RETIRO PENDIENTE (DESDE WEB)**\n\n📥 **ID:** #{tx_id}\n👤 **Usuario:** `{user_id}`\n💰 **Monto:** {monto} USDT", parse_mode="Markdown", reply_markup=markup)
-    except:
-        pass
+        bot.send_message(ADMIN_ID, f"🔔 **NUEVO RETIRO (WEB)**\n\n🆔 ID: #{tx_id}\n👤 User: `{user_id}`\n💰 Monto: {monto} USDT\n🏦 Wallet: `{wallet}`", parse_mode="Markdown", reply_markup=markup)
+    except Exception as e:
+        print(f"Error enviando notif admin: {e}")
         
-    return jsonify({"mensaje": "Solicitud de retiro enviada. Espera la aprobación."})
+    return jsonify({"mensaje": "Solicitud de retiro enviada"})
 
 # ==========================================
 # ARRANQUE
 # ==========================================
 def correr_bot_telegram():
-    print("[Bot] Escuchando comandos...")
+    print("[Bot] Iniciando polling...")
     bot.infinity_polling(timeout=20)
 
 if __name__ == '__main__':
