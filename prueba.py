@@ -14,7 +14,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # CONFIGURACIÓN INICIAL
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
-URL_MINI_APP = 'https://lucent-moonbeam-09dd4d.netlify.app/' 
+URL_MINI_APP = 'https://rainbow-chebakia-deb6e1.netlify.app/' 
 ADMIN_ID = 6808824866 
 
 # URL definitiva usando el Transaction Pooler (IPv4 compatible con Render)
