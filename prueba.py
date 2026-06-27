@@ -48,11 +48,11 @@ def inicializar_base_datos():
             username TEXT,
             saldo_usdt NUMERIC DEFAULT 0.0,
             saldo_lan NUMERIC DEFAULT 1250.0,
-            tierras_compradas JSONB DEFAULT '[]'::jsonb -- Guarda IDs de tierras extra compradas
+            tierras_compradas JSONB DEFAULT '[]'::jsonb
         )
     ''')
     
-    # Tabla Inventario (Items consumibles y plantas base)
+    # Tabla Inventario
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inventario (
             telegram_id BIGINT,
@@ -62,7 +62,7 @@ def inicializar_base_datos():
         )
     ''')
     
-    # Tabla Plantas Activas (En crecimiento)
+    # Tabla Plantas Activas
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS plantas_activas (
             id SERIAL PRIMARY KEY,
@@ -73,7 +73,7 @@ def inicializar_base_datos():
             tiempo_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             duracion_horas INTEGER,
             estado TEXT DEFAULT 'CRECIENDO',
-            recursos JSONB -- Guarda maceta/agua usada
+            recursos JSONB
         )
     ''')
     
@@ -91,15 +91,15 @@ def inicializar_base_datos():
         )
     ''')
     
-    # Tabla Transacciones (Recargas/Retiros)
+    # Tabla Transacciones
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transacciones (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
-            tipo TEXT, -- 'RECARGA' o 'RETIRO'
+            tipo TEXT, 
             monto NUMERIC,
-            wallet_address TEXT, -- Para retiros
-            estado TEXT DEFAULT 'PENDIENTE', -- PENDIENTE, APROBADO, RECHAZADO
+            wallet_address TEXT, 
+            estado TEXT DEFAULT 'PENDIENTE', 
             fecha_solicitud TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -123,7 +123,6 @@ def enviar_bienvenida(message):
         if not conn: return
         cursor = conn.cursor()
         
-        # Verificar si existe
         cursor.execute("SELECT telegram_id FROM usuarios WHERE telegram_id = %s", (user_id,))
         existe = cursor.fetchone()
 
@@ -132,7 +131,6 @@ def enviar_bienvenida(message):
                 "INSERT INTO usuarios (telegram_id, nombre, username, saldo_usdt, saldo_lan) VALUES (%s, %s, %s, 0.0, 1250.0)",
                 (user_id, first_name, username)
             )
-            # Regalo de bienvenida
             cursor.execute("""
                 INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES 
                 (%s, 'maceta_grande', 2),
@@ -223,7 +221,6 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
         if not conn: return
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Bloquear fila para evitar doble gasto
         cursor.execute("SELECT * FROM transacciones WHERE id = %s FOR UPDATE", (tx_id,))
         tx = cursor.fetchone()
         
@@ -241,7 +238,6 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
             if tipo == "RECARGA":
                 cursor.execute("UPDATE usuarios SET saldo_usdt = saldo_usdt + %s WHERE telegram_id = %s", (monto, u_id))
             elif tipo == "RETIRO":
-                # Verificar saldo nuevamente antes de aprobar
                 cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = %s", (u_id,))
                 user_data = cursor.fetchone()
                 if user_data and float(user_data['saldo_usdt']) >= monto:
@@ -313,9 +309,6 @@ def obtener_inventario():
     conn.close()
     return jsonify(items)
 
-# =====================================================
-# NUEVO ENDPOINT: Obtener Tierras y Slots (AGREGADO)
-# =====================================================
 @app.route('/obtener_tierras', methods=['GET'])
 def obtener_tierras():
     user_id = request.args.get('id')
@@ -346,7 +339,7 @@ def obtener_tierras():
 def comprar_item():
     datos = request.json
     user_id = datos.get('id')
-    item_key = datos.get('item') # Ej: 'maceta_grande', 'agua', 'tierra_comun'
+    item_key = datos.get('item')
     
     try:
         cantidad = int(datos.get('cantidad', 1))
@@ -354,7 +347,6 @@ def comprar_item():
     except:
         return jsonify({"error": "Cantidad inválida"}), 400
     
-    # Precios definidos en el Frontend
     precios = {
         'maceta_grande': 20, 
         'agua': 5, 
@@ -376,7 +368,6 @@ def comprar_item():
     if not conn: return jsonify({"error": "DB Error"}), 500
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    # 1. Verificar Saldo
     cursor.execute("SELECT saldo_lan FROM usuarios WHERE telegram_id = %s", (user_id,))
     user = cursor.fetchone()
     
@@ -385,14 +376,9 @@ def comprar_item():
         conn.close()
         return jsonify({"error": "Saldo $LAN insuficiente"}), 400
         
-    # 2. Descontar Saldo
     cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan - %s WHERE telegram_id = %s", (costo_total, user_id))
     
-    # 3. Agregar Item
     if 'tierra' in item_key:
-        # ==========================================
-        # CORREGIDO: Ahora guarda la tierra correctamente
-        # ==========================================
         tipo_tierra_map = {
             'tierra_comun': 'comun',
             'tierra_rara': 'rara', 
@@ -407,9 +393,8 @@ def comprar_item():
                 WHERE telegram_id = %s
             """, ([tipo_db], user_id))
     else:
-        # Items normales (Macetas, Agua, Semillas)
         cursor.execute("""
-            INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
+            INSERT INTO inventario (telegram_id, item_tipo, quantity) 
             VALUES (%s, %s, %s) 
             ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
         """, (user_id, item_key, cantidad))
@@ -419,14 +404,8 @@ def comprar_item():
     cursor.close()
     conn.close()
     
-    # ==========================================
-    # CORREGIDO: Siempre retornar nuevo_saldo
-    # ==========================================
     return jsonify({"mensaje": "Compra exitosa", "nuevo_saldo": nuevo_saldo})
 
-# =====================================================
-# NUEVO ENDPOINT: Germinación de Semillas (AGREGADO)
-# =====================================================
 @app.route('/germinar_semillas', methods=['POST'])
 def germinar_semillas():
     datos = request.json
@@ -436,7 +415,6 @@ def germinar_semillas():
     conn = conectar_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    # 1. Verificar recursos necesarios (Maceta Esp + Agua + Fertilizante)
     cursor.execute("""
         SELECT cantidad FROM inventario 
         WHERE telegram_id = %s AND item_tipo IN ('maceta_especial', 'agua', 'fertilizante_pro')
@@ -444,34 +422,23 @@ def germinar_semillas():
     inv = {row['item_tipo']: row['cantidad'] for row in cursor.fetchall()}
     
     req_maceta = inv.get('maceta_especial', 0) >= cantidad
-    req_agua = inv.get('agua', 0) >= (cantidad * 2)  # HTML dice 2 gotas
+    req_agua = inv.get('agua', 0) >= (cantidad * 2)
     req_fert = inv.get('fertilizante_pro', 0) >= cantidad
     
     if not (req_maceta and req_agua and req_fert):
         cursor.close(); conn.close()
         return jsonify({"error": "Recursos insuficientes"}), 400
     
-    # 2. Descontar recursos
-    cursor.execute("""
-        UPDATE inventario SET cantidad = cantidad - %s 
-        WHERE telegram_id = %s AND item_tipo = 'maceta_especial'
-    """, (cantidad, user_id))
-    cursor.execute("""
-        UPDATE inventario SET cantidad = cantidad - %s 
-        WHERE telegram_id = %s AND item_tipo = 'agua'
-    """, (cantidad * 2, user_id))
-    cursor.execute("""
-        UPDATE inventario SET cantidad = cantidad - %s 
-        WHERE telegram_id = %s AND item_tipo = 'fertilizante_pro'
-    """, (cantidad, user_id))
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - %s WHERE telegram_id = %s AND item_tipo = 'maceta_especial'", (cantidad, user_id))
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - %s WHERE telegram_id = %s AND item_tipo = 'agua'", (cantidad * 2, user_id))
+    cursor.execute("UPDATE inventario SET cantidad = cantidad - %s WHERE telegram_id = %s AND item_tipo = 'fertilizante_pro'", (cantidad, user_id))
     
-    # 3. Crear plantas activas (Rareza aleatoria según HTML)
     rarezas = ['COMÚN', 'RARO', 'ÉPICO', 'LEGENDARIO']
-    pesos = [60, 25, 10, 5]  # Probabilidades
+    pesos = [60, 25, 10, 5]
     for _ in range(cantidad):
         rareza = random.choices(rarezas, weights=pesos, k=1)[0]
         prod_hora = {'COMÚN': 5, 'RARO': 15, 'ÉPICO': 50, 'LEGENDARIO': 200}[rareza]
-        duracion = 24  # Horas según HTML
+        duracion = 24
         
         cursor.execute("""
             INSERT INTO plantas_activas (telegram_id, nombre_planta, rareza, produccion_hora, duracion_horas, estado)
@@ -482,9 +449,6 @@ def germinar_semillas():
     cursor.close(); conn.close()
     return jsonify({"mensaje": "Germinación exitosa"})
 
-# =====================================================
-# NUEVO ENDPOINT: Cosecha de Plantas (AGREGADO)
-# =====================================================
 @app.route('/cosechar', methods=['POST'])
 def cosechar():
     datos = request.json
@@ -494,7 +458,6 @@ def cosechar():
     conn = conectar_db()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    # Verificar que la planta esté lista
     cursor.execute("""
         SELECT * FROM plantas_activas 
         WHERE id = %s AND telegram_id = %s AND estado = 'LISTO_PARA_COSCHA'
@@ -505,19 +468,10 @@ def cosechar():
         cursor.close(); conn.close()
         return jsonify({"error": "Planta no lista"}), 400
     
-    # Sumar recompensa
     cursor.execute("UPDATE usuarios SET saldo_lan = saldo_lan + %s WHERE telegram_id = %s", 
                    (planta['produccion_hora'] * planta['duracion_horas'], user_id))
-    
-    # Eliminar planta activa
     cursor.execute("DELETE FROM plantas_activas WHERE id = %s", (planta_id,))
-    
-    # Devolver maceta al almacén (según HTML: "La planta vuelve al almacén")
-    cursor.execute("""
-        INSERT INTO inventario (telegram_id, item_tipo, cantidad) 
-        VALUES (%s, 'maceta_grande', 1) 
-        ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad
-    """, (user_id,))
+    cursor.execute("INSERT INTO inventario (telegram_id, item_tipo, cantidad) VALUES (%s, 'maceta_grande', 1) ON CONFLICT(telegram_id, item_tipo) DO UPDATE SET cantidad = inventario.cantidad + EXCLUDED.cantidad", (user_id,))
     
     conn.commit()
     cursor.close(); conn.close()
@@ -547,7 +501,6 @@ def solicitar_recarga_web():
     cursor.close()
     conn.close()
     
-    # Notificar al Admin
     try:
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("✅ Aprobar", callback_data=f"aprob_{tx_id}"),
@@ -575,7 +528,6 @@ def solicitar_retiro_web():
     if not conn: return jsonify({"error": "DB Error"}), 500
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     
-    # Verificar saldo antes de crear solicitud
     cursor.execute("SELECT saldo_usdt FROM usuarios WHERE telegram_id = %s", (user_id,))
     user = cursor.fetchone()
     
@@ -601,6 +553,89 @@ def solicitar_retiro_web():
         print(f"Error enviando notif admin: {e}")
         
     return jsonify({"mensaje": "Solicitud de retiro enviada", "tx_id": tx_id})
+
+# =====================================================
+# NUEVO ENDPOINT: Swap de Monedas LAN <-> USDT (AGREGADO)
+# =====================================================
+@app.route('/procesar_swap_web', methods=['POST'])
+def procesar_swap_web():
+    datos = request.json
+    user_id = datos.get('id')
+    tipo_swap = datos.get('tipo')      # "lan_to_usdt" o "usdt_to_lan"
+    cantidad = float(datos.get('cantidad', 0))
+
+    if cantidad <= 0:
+        return jsonify({"error": "Cantidad inválida"}), 400
+
+    # Tasas de conversión fijas (Cambia los valores si tienes otros precios)
+    TASA_LAN_A_USDT = 0.01  
+    TASA_USDT_A_LAN = 100.0 
+
+    conn = conectar_db()
+    if not conn: 
+        return jsonify({"error": "Error de conexión con la base de datos"}), 500
+        
+    cursor = conn.cursor()
+
+    try:
+        # Obtener datos del usuario bloqueando la fila para evitar duplicados
+        cursor.execute("SELECT saldo_usdt, saldo_lan FROM usuarios WHERE telegram_id = %s FOR UPDATE", (user_id,))
+        usuario = cursor.fetchone()
+
+        if not usuario:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "Usuario no encontrado"}), 404
+
+        saldo_usdt_actual = float(usuario[0])
+        saldo_lan_actual = float(usuario[1])
+
+        if tipo_swap == "lan_to_usdt":
+            if saldo_lan_actual < cantidad:
+                return jsonify({"error": "Saldo $LAN insuficiente para el swap"}), 400
+            
+            recibe_usdt = cantidad * TASA_LAN_A_USDT
+            cursor.execute("""
+                UPDATE usuarios 
+                SET saldo_lan = saldo_lan - %s, saldo_usdt = saldo_usdt + %s 
+                WHERE telegram_id = %s
+            """, (cantidad, recibe_usdt, user_id))
+            
+            nuevo_lan = saldo_lan_actual - cantidad
+            nuevo_usdt = saldo_usdt_actual + recibe_usdt
+
+        elif tipo_swap == "usdt_to_lan":
+            if saldo_usdt_actual < cantidad:
+                return jsonify({"error": "Saldo USDT insuficiente para el swap"}), 400
+            
+            recibe_lan = cantidad * TASA_USDT_A_LAN
+            cursor.execute("""
+                UPDATE usuarios 
+                SET saldo_usdt = saldo_usdt - %s, saldo_lan = saldo_lan + %s 
+                WHERE telegram_id = %s
+            """, (cantidad, recibe_lan, user_id))
+            
+            nuevo_usdt = saldo_usdt_actual - cantidad
+            nuevo_lan = saldo_lan_actual + recibe_lan
+        else:
+            return jsonify({"error": "Tipo de swap no válido"}), 400
+
+        # Guardar cambios definitivamente en Render
+        conn.commit()
+
+        return jsonify({
+            "mensaje": "Swap completado con éxito",
+            "nuevo_lan": nuevo_lan,
+            "nuevo_usdt": nuevo_usdt
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[ERROR SWAP] {e}")
+        return jsonify({"error": "Error interno al procesar el swap"}), 500
+    finally:
+        cursor.close()
+        conn.close()
 
 # ==========================================
 # ARRANQUE
