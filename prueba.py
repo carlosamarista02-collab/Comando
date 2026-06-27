@@ -18,7 +18,7 @@ URL_MINI_APP = 'https://rainbow-chebakia-deb6e1.netlify.app/'
 ADMIN_ID = 6808824866 
 
 # URL definitiva usando el Transaction Pooler (IPv4 compatible con Render)
-DATABASE_URL = "postgresql://flowerlan_db_user:ZtIxIRVDJwBs6qqIFMLS3Z8CRUowjbZ9@dpg-d8vskgrsq97s738ojr9g-a.oregon-postgres.render.com/flowerlan_db"
+DATABASE_URL = "postgresql://flowerlandb_iptk_user:MDqTDmomDhmW10w3WFEewovzagQgT7WS@dpg-d8vskgrsq97s738ojr9g-a.oregon-postgres.render.com/flowerlan_db"
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
