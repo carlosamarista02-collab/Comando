@@ -2,7 +2,7 @@ import threading
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import time
-import random
+import ran
 import os
 import json
 from datetime import datetime
@@ -15,7 +15,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # CONFIGURACIÓN INICIAL
 # ==========================================
 TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
-URL_MINI_APP = 'https://rainbow-chebakia-deb6e1.netlify.app/'
+URL_MINI_APP = 'https://aesthetic-chaja-a87a4e.netlify.app/'
 ADMIN_ID = 6808824866
 
 DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:72bGmBxf6qzb-iY@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
