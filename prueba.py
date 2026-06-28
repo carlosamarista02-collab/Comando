@@ -2,7 +2,7 @@ import threading
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import time
-import ran
+import random
 import os
 import json
 from datetime import datetime
@@ -266,7 +266,7 @@ def gestionar_transaccion_admin(tx_id, accion, message_obj):
             
         cursor.close(); conn.close()
     except Exception as e:
-        print(f"Error gestionando transacción: {e}")
+        print(f"Error gesturing transacción: {e}")
 
 # ==========================================
 # API FLASK - ENDPOINTS PÚBLICOS
@@ -383,58 +383,69 @@ def comprar_item():
 
     return jsonify({"mensaje": "Compra exitosa", "nuevo_saldo": nuevo_saldo})
 
-# ---------- INTERCAMBIO ----------
-@app.route('/api/intercambio', methods=['POST'])
-def realizar_intercambio():
-    datos = request.json
-    user_id = datos.get('id')
-    monto = float(datos.get('monto', 0))
-    direccion = datos.get('direccion', 'usdt_to_lan')
-    
-    if monto <= 0:
-        return jsonify({"error": "Monto inválido"}), 400
+# ---------- INTERCAMBIO (SWAP) ----------
+@app.route('/procesar_swap_web', methods=['POST'])
+def procesar_swap_web():
+    data = request.get_json()
+    user_id = data.get('id')
+    tipo_swap = data.get('tipo')  # 'usdt_to_lan' o 'lan_to_usdt'
+    cantidad = float(data.get('cantidad', 0))
+
+    if not user_id or cantidad <= 0:
+        return jsonify({'error': 'Datos inválidos'}), 400
 
     conn = conectar_db()
     if not conn: return jsonify({"error": "DB Error"}), 500
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    cur = conn.cursor()
 
     try:
-        cursor.execute("SELECT saldo_usdt, saldo_lan FROM usuarios WHERE telegram_id = %s FOR UPDATE", (user_id,))
-        user = cursor.fetchone()
+        # Verificar saldo actual del usuario
+        cur.execute("SELECT saldo_lan, saldo_usdt FROM usuarios WHERE telegram_id = %s FOR UPDATE", (user_id,))
+        resultado = cur.fetchone()
+
+        if not resultado:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
         
-        if not user:
-            return jsonify({"error": "Usuario no encontrado"}), 404
-            
-        saldo_usdt = float(user['saldo_usdt'])
-        saldo_lan = float(user['saldo_lan'])
-        
-        if direccion == 'usdt_to_lan':
-            if saldo_usdt < monto:
-                return jsonify({"error": "Saldo USDT insuficiente"}), 400
-            nuevo_usdt = saldo_usdt - monto
-            nuevo_lan = saldo_lan + monto
-        elif direccion == 'lan_to_usdt':
-            if saldo_lan < monto:
-                return jsonify({"error": "Saldo LAN insuficiente"}), 400
-            nuevo_lan = saldo_lan - monto
-            nuevo_usdt = saldo_usdt + monto
+        saldo_lan, saldo_usdt = resultado
+        saldo_lan = float(saldo_lan)
+        saldo_usdt = float(saldo_usdt)
+
+        if tipo_swap == 'usdt_to_lan':
+            if saldo_usdt < cantidad:
+                return jsonify({'error': 'Saldo USDT insuficiente'}), 400
+            nuevo_usdt = saldo_usdt - cantidad
+            nuevo_lan = saldo_lan + cantidad
+        elif tipo_swap == 'lan_to_usdt':
+            if saldo_lan < cantidad:
+                return jsonify({'error': 'Saldo LAN insuficiente'}), 400
+            nuevo_lan = saldo_lan - cantidad
+            nuevo_usdt = saldo_usdt + cantidad
         else:
-            return jsonify({"error": "Dirección inválida"}), 400
-            
-        cursor.execute("UPDATE usuarios SET saldo_usdt = %s, saldo_lan = %s WHERE telegram_id = %s", (nuevo_usdt, nuevo_lan, user_id))
+            return jsonify({'error': 'Tipo de swap no válido'}), 400
+
+        # Actualizar los saldos en la base de datos
+        cur.execute(
+            "UPDATE usuarios SET saldo_lan = %s, saldo_usdt = %s WHERE telegram_id = %s",
+            (nuevo_lan, nuevo_usdt, user_id)
+        )
         conn.commit()
-        
+
         try:
-            bot.send_message(ADMIN_ID, f"💱 <b>Intercambio Realizado</b>\n👤 User: {user_id}\n💰 Monto: {monto}\n🔄 Dirección: {direccion}", parse_mode="HTML")
+            bot.send_message(ADMIN_ID, f"💱 <b>Intercambio Realizado</b>\n👤 User: {user_id}\n💰 Cantidad: {cantidad}\n🔄 Tipo: {tipo_swap}", parse_mode="HTML")
         except: pass
-        
-        return jsonify({"success": True, "nuevo_usdt": nuevo_usdt, "nuevo_lan": nuevo_lan})
-        
+
+        return jsonify({
+            'success': True,
+            'nuevo_lan': nuevo_lan,
+            'nuevo_usdt': nuevo_usdt
+        })
+
     except Exception as e:
         conn.rollback()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
     finally:
-        cursor.close(); conn.close()
+        cur.close()
+        conn.close()
 
 # ---------- RECARGAS Y RETIROS ----------
 @app.route('/solicitar_recarga_web', methods=['POST'])
