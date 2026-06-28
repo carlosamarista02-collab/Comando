@@ -18,7 +18,7 @@ TOKEN_TELEGRAM = '8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA'
 URL_MINI_APP = 'https://aesthetic-chaja-a87a4e.netlify.app/'
 ADMIN_ID = 6808824866
 
-DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:72bGmBxf6qzb-iY@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+DATABASE_URL = "postgresql://flowerlandb_iptk_user:MDqTDmomDhmW10w3WFEewovzagQgT7WS@dpg-d8vskgrsq97s738ojr9g-a.oregon-postgres.render.com/flowerlan_db"
 
 bot = telebot.TeleBot(TOKEN_TELEGRAM)
 app = Flask(__name__)
