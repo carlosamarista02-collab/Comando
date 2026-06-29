@@ -1,5 +1,6 @@
 import random
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Depends
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuración de Base de Datos ---
 DATABASE_URL = "sqlite:///./granja_p2p.db"
@@ -16,9 +18,10 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAFN8kiDJZ9yIxeIL3JWC00DBeWRHRjMMOw")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA")
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "6808824866"))
-GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-0"))  # ID del grupo
+GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))  # ID del grupo
+MINI_APP_URL = os.getenv("MINI_APP_URL", "https://t.me/TuBot/app_name")     # URL de tu Mini App
 
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -126,7 +129,22 @@ def verify_admin(telegram_id: int, db: Session):
 
 app = FastAPI(title="GranjaP2P API")
 
-# --- Funciones de Telegram ---
+# --- LÓGICA DE COMANDOS DEL BOT (Manejador de Telegram) ---
+if bot:
+    @bot.message_handler(commands=['start'])
+    def handle_start_command(message):
+        chat_id = message.chat.id
+        first_name = message.from_user.first_name
+        
+        # Agregamos el botón interactivo que solicita la URL de la miniapp
+        markup = InlineKeyboardMarkup()
+        btn_play = InlineKeyboardButton(text="🎮 Jugar Ahora", url=MINI_APP_URL)
+        markup.add(btn_play)
+        
+        texto_bienvenida = f"¡Hola {first_name}! 🌾 Bienvenido a GranjaP2P.\n\nPresiona el botón de abajo para abrir la MiniApp directamente en Telegram y empezar a cultivar."
+        bot.send_message(chat_id, texto_bienvenida, reply_markup=markup, parse_mode="Markdown")
+
+# --- Funciones de Telegram (Notificaciones) ---
 def send_telegram_notification(chat_id: int, message: str):
     if bot and chat_id:
         try:
@@ -298,7 +316,7 @@ def process_transaction(request: ProcessTransactionRequest, telegram_id: int, db
         transaction.processed_at = datetime.utcnow()
         transaction.processed_by = admin.id
         
-        msg = f"❌ *Transacción Rechazada*\nTipo: {transaction.type}\nMonto: {transaction.amount} LAN"
+        msg = f"❌ *Transacción Identificada*\nTipo: {transaction.type}\nMonto: {transaction.amount} LAN"
         
         if user.telegram_id:
             notify_user(user.telegram_id, msg)
@@ -504,16 +522,28 @@ def check_admin_status(telegram_id: int, db: Session = Depends(get_db)):
         "admin_panel_url": "/admin/dashboard" if is_admin else None
     }
 
-# --- Botón de Grupo ---
+# --- Botón de Grupo / Play MiniApp ---
 @app.get("/grupo/info")
 def get_grupo_info():
-    """Información del grupo de Telegram"""
+    """Información del grupo de Telegram y URL directa al botón Play de la MiniApp"""
     return {
         "grupo_id": GRUPO_TELEGRAM_ID,
-        "mensaje": "Únete al grupo oficial para novedades y soporte",
-        "boton_texto": "Unirse al Grupo"
+        "mensaje": "¡Entra a gestionar tu granja directamente desde Telegram!",
+        "boton_texto": "Jugar Ahora",
+        "play_url": MINI_APP_URL
     }
+
+# --- FUNCIÓN PARA INICIAR EL BOT EN SEGUNDO PLANO (POLLING) ---
+def run_bot():
+    if bot:
+        print("Bot de Telegram escuchando comandos en segundo plano...")
+        bot.infinity_polling()
 
 if __name__ == "__main__":
     import uvicorn
+    # Iniciamos el bot en un hilo secundario para evitar que interfiera o bloquee el arranque de FastAPI
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Lanzamos el servidor web Uvicorn normalmente
     uvicorn.run(app, host="0.0.0.0", port=8000)
