@@ -16,7 +16,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8939217389:AAFBjWVad0weeypJMh8nP9Rm8f5cXMIo35M")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAFN8kiDJZ9yIxeIL3JWC00DBeWRHRjMMOw")
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "6808824866"))
 GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-0"))  # ID del grupo
 
