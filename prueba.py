@@ -18,7 +18,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8939217389:AAHDVYsmfx8TFCbjtrZHlIfppajsPluJcQA")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAFN8kiDJZ9yIxeIL3JWC00DBeWRHRjMMOw")
 ADMIN_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "6808824866"))
 GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))  # ID del grupo
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://t.me/TuBot/app_name")     # URL de tu Mini App
