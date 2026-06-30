@@ -25,7 +25,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
-TELEGRAM_BOT_TOKEN = "8206009148:AAFN8kiDJZ9yIxeIL3JWC00DBeWRHRjMMOw"
+TELEGRAM_BOT_TOKEN = "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY"
 ADMIN_ID = 6808824866
 GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))
 MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/" 
