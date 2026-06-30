@@ -12,13 +12,20 @@ from sqlalchemy.orm import sessionmaker, Session
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# --- Configuración de Base de Datos ---
+# --- Configuración de Base de Datos (Con Pool optimizado para evitar saturación) ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres")
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 
-engine = create_engine(DATABASE_URL)
+# Se añaden parámetros de pool para aguantar más conexiones y reciclar hilos muertos
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=20,          # Aumenta el tamaño base de conexiones
+    max_overflow=30,       # Permite ráfagas extra si hay tráfico
+    pool_recycle=1800,     # Recicla conexiones viejas cada 30 minutos
+    pool_pre_ping=True     # Verifica si la conexión sigue viva antes de usarla
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -136,13 +143,13 @@ app = FastAPI(title="GranjaP2P API")
 if bot:
     @bot.message_handler(commands=['start'])
     def send_welcome(message):
+        chat_id = message.chat.id
+        tg_username = message.from_user.username or f"user_{chat_id}"
+        first_name = message.from_user.first_name
+        
+        # FORZAMOS LA APERTURA INDEPENDIENTE CON CIERRE GARANTIZADO
         db = SessionLocal()
         try:
-            chat_id = message.chat.id
-            tg_username = message.from_user.username or f"user_{chat_id}"
-            first_name = message.from_user.first_name
-            
-            # Buscar si el usuario ya existe por username o crearlo
             user = db.query(User).filter(User.username == tg_username).first()
             if not user:
                 user = User(username=tg_username, telegram_id=chat_id, lan_balance=0.0)
@@ -150,7 +157,6 @@ if bot:
                 db.commit()
                 db.refresh(user)
             else:
-                # Si ya existía pero no tenía el ID guardado, se actualiza automáticamente
                 if user.telegram_id != chat_id:
                     user.telegram_id = chat_id
                     db.commit()
@@ -168,6 +174,7 @@ if bot:
         except Exception as e:
             print(f"Error en comando start: {e}")
         finally:
+            # ESTA LÍNEA LIBERA LA CONEXIÓN PARA QUE NUNCA MÁS SE LLENE EL POOL
             db.close()
 
     @bot.message_handler(commands=['help'])
@@ -242,7 +249,7 @@ def link_telegram(username: str, request: LinkTelegramRequest, db: Session = Dep
     notify_user(request.telegram_id, f"✅ ¡Hola {username}! Tu cuenta ha sido vinculada.")
     return {"message": "Telegram vinculado correctamente"}
 
-# --- BOTONES DE ADMINISTRACIÓN RESTAURADOS ---
+# --- Botones Administrativos ---
 @app.post("/transaction/request/{username}")
 def request_transaction(username: str, request: TransactionRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
@@ -354,6 +361,3 @@ if __name__ == "__main__":
         print("🚀 [Sistema] Hilo independiente del Bot inicializado.")
         
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
