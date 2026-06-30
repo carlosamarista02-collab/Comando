@@ -1,6 +1,7 @@
 import random
 import os
 import threading
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Depends
@@ -9,6 +10,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 # --- Configuración de Base de Datos (Supabase en la nube) ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres")
@@ -16,13 +18,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres.rsqcsdh
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 
-# Inicializamos el motor de PostgreSQL para Supabase
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
-# CORREGIDO: Leemos el token de forma segura desde las variables de Render para evitar conflictos de autenticación.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY")
 ADMIN_ID = 6808824866
 GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))
@@ -72,15 +72,13 @@ class Transaction(Base):
     processed_at = Column(DateTime, nullable=True)
     processed_by = Column(Integer, nullable=True)
 
-# --- PROTECCIÓN CRÍTICA PARA REINICIOS EN RENDER ---
 try:
     print("Verificando tablas en Supabase...")
     Base.metadata.create_all(bind=engine)
     print("Base de datos lista y conectada.")
 except Exception as db_err:
-    print(f"Las tablas ya se encuentran listas en Supabase. Continuando de forma segura: {db_err}")
+    print(f"Tablas listas o error seguro en Supabase: {db_err}")
 
-# --- Definiciones ---
 PLANT_DEFINITIONS = {
     "Comun": {"min_time": 1, "max_time": 4, "price": 5, "lan_reward_min": 10, "lan_reward_max": 20},
     "PocoComun": {"min_time": 5, "max_time": 12, "price": 15, "lan_reward_min": 30, "lan_reward_max": 50},
@@ -88,13 +86,8 @@ PLANT_DEFINITIONS = {
     "Legendaria": {"min_time": 25, "max_time": 72, "price": 100, "lan_reward_min": 200, "lan_reward_max": 500}
 }
 
-LAND_PRICES = {
-    "Comun": 10,
-    "Rara": 30,
-    "Legendaria": 80
-}
+LAND_PRICES = {"Comun": 10, "Rara": 30, "Legendaria": 80}
 
-# --- Esquemas Pydantic ---
 class PlantResponse(BaseModel):
     id: int
     name: str
@@ -123,7 +116,6 @@ class ProcessTransactionRequest(BaseModel):
     transaction_id: int
     action: str  
 
-# --- Dependencias ---
 def get_db():
     db = SessionLocal()
     try:
@@ -137,23 +129,62 @@ def verify_admin(telegram_id: int, db: Session):
         raise HTTPException(status_code=403, detail="Acceso denegado. Solo administradores.")
     return user
 
+# --- Instancia de FastAPI ---
 app = FastAPI(title="GranjaP2P API")
 
-# --- Funciones de Telegram ---
+# --- Controladores de Mensajes de Telegram ---
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        try:
+            chat_id = message.chat.id
+            first_name = message.from_user.first_name
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(text="🌾 Jugar FlowerLand", web_app=WebAppInfo(url=MINI_APP_URL)))
+            
+            welcome_text = (
+                f"¡Hola *{first_name}*! 👋\n\n"
+                f"Bienvenido a *FlowerLand*, tu granja P2E.\n"
+                f"Presiona el botón de abajo para empezar a jugar."
+            )
+            bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=markup)
+        except Exception as e:
+            print(f"Error en comando start: {e}")
+
+    @bot.message_handler(commands=['help'])
+    def send_help(message):
+        help_text = "📌 *Comandos:*\n\n/start - Abrir app\n/help - Ayuda"
+        bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+
+# --- Polling Asíncrono Correcto para Render ---
+def run_bot():
+    if bot:
+        print("🤖 [Telegram] Iniciando polling del bot de forma segura...")
+        try:
+            bot.remove_webhook()
+            bot.infinity_polling(timeout=30, long_polling_timeout=15, skip_pending=True)
+        except Exception as e:
+            print(f"❌ [Telegram] Error crítico en polling: {e}")
+
+# --- Evento de Inicio Seguro de FastAPI ---
+@app.on_event("startup")
+async def startup_event():
+    # Esto arranca el bot de Telegram de fondo garantizando que Render no mate el proceso al encender Uvicorn
+    thread = threading.Thread(target=run_bot)
+    thread.daemon = True
+    thread.start()
+    print("🚀 [FastAPI] Hilo de Telegram lanzado en segundo plano.")
+
+# --- Funciones de Notificaciones ---
 def send_telegram_notification(chat_id: int, message: str):
     if bot and chat_id:
-        try:
-            bot.send_message(chat_id, message, parse_mode="Markdown")
-        except Exception as e:
-            print(f"Error enviando mensaje a Telegram: {e}")
+        try: bot.send_message(chat_id, message, parse_mode="Markdown")
+        except Exception as e: print(f"Error notificación: {e}")
 
-def notify_admin(message: str):
-    send_telegram_notification(ADMIN_ID, f"🔔 *Admin Alert*\n{message}")
+def notify_admin(message: str): send_telegram_notification(ADMIN_ID, f"🔔 *Admin Alert*\n{message}")
+def notify_user(user_id: int, message: str): send_telegram_notification(user_id, message)
 
-def notify_user(user_id: int, message: str):
-    send_telegram_notification(user_id, message)
-
-# --- Funciones Auxiliares ---
 def calculate_progress(plant: Plant):
     elapsed = datetime.utcnow() - plant.start_time
     elapsed_hours = elapsed.total_seconds() / 3600
@@ -171,13 +202,10 @@ def get_random_plant_name(rarity: str):
     return random.choice(names.get(rarity, ["Planta Desconocida"]))
 
 # --- Endpoints Públicos ---
-
 @app.post("/register/{username}")
 def register_user(username: str, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.username == username).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Usuario ya existe")
-    
+    if existing: raise HTTPException(status_code=400, detail="Usuario ya existe")
     new_user = User(username=username, lan_balance=0.0)
     db.add(new_user)
     db.commit()
@@ -187,190 +215,53 @@ def register_user(username: str, db: Session = Depends(get_db)):
 @app.get("/user/{username}")
 def get_user_profile(username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
+    if not user: raise HTTPException(status_code=404, detail="Usuario no encontrado")
     lands = db.query(Land).filter(Land.user_id == user.id).all()
     return {
-        "username": user.username,
-        "lan_balance": user.lan_balance,
-        "telegram_id": user.telegram_id,
-        "is_admin": user.is_admin,
+        "username": user.username, "lan_balance": user.lan_balance, "telegram_id": user.telegram_id,
         "lands": [{"id": l.id, "type": l.type, "slots": l.slots_total} for l in lands]
     }
 
 @app.post("/link-telegram/{username}")
 def link_telegram(username: str, request: LinkTelegramRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
+    if not user: raise HTTPException(status_code=404, detail="Usuario no encontrado")
     user.telegram_id = request.telegram_id
     db.commit()
-    
     notify_user(request.telegram_id, f"✅ ¡Hola {username}! Tu cuenta ha sido vinculada.")
-    notify_admin(f"El usuario {username} vinculó Telegram ID: {request.telegram_id}")
     return {"message": "Telegram vinculado correctamente"}
-
-# --- Endpoints de Transacciones ---
-
-@app.post("/transaction/request/{username}")
-def request_transaction(username: str, request: TransactionRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    if request.type not in ["recarga", "retiro"]:
-        raise HTTPException(status_code=400, detail="Tipo de transacción inválido")
-    
-    if request.amount <= 0:
-        raise HTTPException(status_code=400, detail="Monto debe ser positivo")
-    
-    if request.type == "retiro" and user.lan_balance < request.amount:
-        raise HTTPException(status_code=400, detail="Saldo insuficiente para retiro")
-    
-    transaction = Transaction(user_id=user.id, type=request.type, amount=request.amount, status="pendiente")
-    db.add(transaction)
-    db.commit()
-    
-    msg = f"💰 *Nueva Solicitud*\nUsuario: {username}\nTipo: {request.type.upper()}\nMonto: {request.amount} LAN\nID: {transaction.id}"
-    notify_admin(msg)
-    
-    try:
-        send_telegram_notification(GRUPO_TELEGRAM_ID, f"📢 Nueva solicitud de {request.type} por {username}")
-    except:
-        pass
-    return {"message": f"Solicitud de {request.type} enviada", "transaction_id": transaction.id}
-
-@app.get("/transaction/pending")
-def get_pending_transactions(telegram_id: int, db: Session = Depends(get_db)):
-    admin = verify_admin(telegram_id, db)
-    pending = db.query(Transaction).filter(Transaction.status == "pendiente").all()
-    result = []
-    for t in pending:
-        user = db.query(User).filter(User.id == t.user_id).first()
-        result.append({
-            "id": t.id,
-            "username": user.username if user else "Desconocido",
-            "type": t.type,
-            "amount": t.amount,
-            "created_at": t.created_at.isoformat()
-        })
-    return result
-
-@app.post("/transaction/process")
-def process_transaction(request: ProcessTransactionRequest, telegram_id: int, db: Session = Depends(get_db)):
-    admin = verify_admin(telegram_id, db)
-    transaction = db.query(Transaction).filter(Transaction.id == request.transaction_id).first()
-    if not transaction:
-        raise HTTPException(status_code=404, detail="Transacción no encontrada")
-    
-    if transaction.status != "pendiente":
-        raise HTTPException(status_code=400, detail="Transacción ya procesada")
-    
-    user = db.query(User).filter(User.id == transaction.user_id).first()
-    
-    if request.action == "aprobar":
-        transaction.status = "aprobado"
-        transaction.processed_at = datetime.utcnow()
-        transaction.processed_by = admin.id
-        
-        if transaction.type == "recarga":
-            user.lan_balance += transaction.amount
-            msg = f"✅ *Recarga Aprobada*\nMonto: {transaction.amount} LAN\nNuevo saldo: {user.lan_balance} LAN"
-        elif transaction.type == "retiro":
-            user.lan_balance -= transaction.amount
-            msg = f"✅ *Retiro Aprobado*\nMonto: {transaction.amount} LAN\nSaldo restante: {user.lan_balance} LAN"
-        
-        if user.telegram_id:
-            notify_user(user.telegram_id, msg)
-        notify_admin(f"Transacción #{transaction.id} aprobada para {user.username}")
-        
-    elif request.action == "rechazar":
-        transaction.status = "rechazado"
-        transaction.processed_at = datetime.utcnow()
-        transaction.processed_by = admin.id
-        msg = f"❌ *Transacción Rechazada*\nTipo: {transaction.type}\nMonto: {transaction.amount} LAN"
-        if user.telegram_id:
-            notify_user(user.telegram_id, msg)
-        notify_admin(f"Transacción #{transaction.id} rechazada para {user.username}")
-    else:
-        raise HTTPException(status_code=400, detail="Acción inválida")
-    
-    db.commit()
-    return {"message": f"Transacción {request.action}da exitosamente"}
-
-# --- Endpoints del Juego ---
 
 @app.post("/buy-land")
 def buy_land(request: BuyLandRequest, username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
     price = LAND_PRICES.get(request.land_type)
-    if not price:
-        raise HTTPException(status_code=400, detail="Tipo de tierra inválido")
-    
-    if user.lan_balance < price:
-        raise HTTPException(status_code=400, detail="Saldo LAN insuficiente")
-    
+    if not price or user.lan_balance < price: raise HTTPException(status_code=400, detail="Saldo insuficiente")
     slots_map = {"Comun": 4, "Rara": 8, "Legendaria": 12}
     user.lan_balance -= price
-    
-    # CORREGIDO: Eliminada la línea duplicada de creación de Land
-    new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type], is_free_land=False)
+    new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type])
     db.add(new_land)
     db.commit()
-    
-    msg = f"🌱 *Nueva Compra*\nUsuario: {username}\nTierra: {request.land_type}\nSaldo: {user.lan_balance} LAN"
-    if user.telegram_id:
-        notify_user(user.telegram_id, msg)
-    notify_admin(msg)
-    return {"message": f"Tierra {request.land_type} comprada", "new_balance": user.lan_balance}
+    return {"message": "Tierra comprada", "new_balance": user.lan_balance}
 
 @app.post("/plant-seed")
 def plant_seed(request: PlantSeedRequest, username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     land = db.query(Land).filter(Land.id == request.land_id, Land.user_id == user.id).first()
-    if not land:
-        raise HTTPException(status_code=404, detail="Tierra no encontrada")
-    
-    existing_plants = db.query(Plant).filter(Plant.land_id == request.land_id).count()
-    if existing_plants >= land.slots_total:
-        raise HTTPException(status_code=400, detail="No hay slots disponibles")
-
     rarity_config = PLANT_DEFINITIONS.get(request.rarity)
-    if not rarity_config:
-        raise HTTPException(status_code=400, detail="Rareza inválida")
-    
-    seed_cost = rarity_config["price"]
-    if user.lan_balance < seed_cost:
-        raise HTTPException(status_code=400, detail="Saldo insuficiente")
-    
+    if not land or not rarity_config or user.lan_balance < rarity_config["price"]:
+        raise HTTPException(status_code=400, detail="Error de requisitos")
     random_time = random.uniform(rarity_config["min_time"], rarity_config["max_time"])
-    plant_name = get_random_plant_name(request.rarity)
-    
-    new_plant = Plant(land_id=request.land_id, name=plant_name, rarity=request.rarity, total_time_hours=random_time, start_time=datetime.utcnow(), is_harvested=False)
-    user.lan_balance -= seed_cost
+    new_plant = Plant(land_id=request.land_id, name=get_random_plant_name(request.rarity), rarity=request.rarity, total_time_hours=random_time)
+    user.lan_balance -= rarity_config["price"]
     db.add(new_plant)
     db.commit()
-    
-    msg = f"🌿 *Sembrado*\n{username}: {plant_name} ({request.rarity})\nTiempo: {round(random_time, 2)}h"
-    if user.telegram_id:
-        notify_user(user.telegram_id, msg)
-    return {"message": "Planta sembrada", "plant_name": plant_name, "total_time_hours": round(random_time, 2), "new_balance": user.lan_balance}
+    return {"message": "Planta sembrada"}
 
 @app.get("/my-plants/{username}", response_model=List[PlantResponse])
 def get_my_plants(username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
     user_lands = db.query(Land).filter(Land.user_id == user.id).all()
-    land_ids = [l.id for l in user_lands]
-    plants = db.query(Plant).filter(Plant.land_id.in_(land_ids), Plant.is_harvested == False).all()
-    
+    plants = db.query(Plant).filter(Plant.land_id.in_([l.id for l in user_lands]), Plant.is_harvested == False).all()
     result = []
     for p in plants:
         progress, remaining, is_ready = calculate_progress(p)
@@ -381,84 +272,18 @@ def get_my_plants(username: str, db: Session = Depends(get_db)):
 def harvest_plant(plant_id: int, username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     plant = db.query(Plant).filter(Plant.id == plant_id).first()
-    if not plant:
-        raise HTTPException(status_code=404, detail="Planta no encontrada")
-    
-    land = db.query(Land).filter(Land.id == plant.land_id, Land.user_id == user.id).first()
-    if not land:
-        raise HTTPException(status_code=403, detail="Sin permiso")
-    
     progress, remaining, is_ready = calculate_progress(plant)
-    if not is_ready:
-        raise HTTPException(status_code=400, detail=f"Faltan {remaining} horas")
-    
-    rarity_config = PLANT_DEFINITIONS[plant.rarity]
-    reward = random.uniform(rarity_config["lan_reward_min"], rarity_config["lan_reward_max"])
-    
+    if not is_ready: raise HTTPException(status_code=400, detail="Cultivo no listo")
+    reward = random.uniform(PLANT_DEFINITIONS[plant.rarity]["lan_reward_min"], PLANT_DEFINITIONS[plant.rarity]["lan_reward_max"])
     user.lan_balance += reward
     plant.is_harvested = True
     db.commit()
-    
-    msg = f"💰 *¡Cosecha!*\n{username}: +{round(reward, 2)} LAN\nSaldo: {user.lan_balance} LAN"
-    if user.telegram_id:
-        notify_user(user.telegram_id, msg)
-    notify_admin(f"Cosecha: {username} +{round(reward, 2)} LAN")
-    return {"message": f"Cosecha exitosa: {round(reward, 2)} LAN", "reward": round(reward, 2), "new_balance": user.lan_balance}
-
-# --- Panel de Administrador ---
-
-@app.get("/admin/dashboard")
-def admin_dashboard(telegram_id: int, db: Session = Depends(get_db)):
-    admin = verify_admin(telegram_id, db)
-    total_users = db.query(User).count()
-    total_transactions = db.query(Transaction).count()
-    pending_transactions = db.query(Transaction).filter(Transaction.status == "pendiente").count()
-    approved_transactions = db.query(Transaction).filter(Transaction.status == "aprobado").count()
-    
-    recent_transactions = db.query(Transaction).order_by(Transaction.created_at.desc()).limit(10).all()
-    transactions_list = []
-    for t in recent_transactions:
-        user = db.query(User).filter(User.id == t.user_id).first()
-        transactions_list.append({
-            "id": t.id,
-            "username": user.username if user else "Desconocido",
-            "type": t.type,
-            "amount": t.amount,
-            "status": t.status,
-            "created_at": t.created_at.isoformat()
-        })
-    return {
-        "admin_username": admin.username,
-        "stats": {"total_users": total_users, "total_transactions": total_transactions, "pending": pending_transactions, "approved": approved_transactions},
-        "recent_transactions": transactions_list,
-        "admin_telegram_id": ADMIN_ID
-    }
-
-@app.get("/admin/check")
-def check_admin_status(telegram_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    is_admin = user and user.is_admin
-    return {"is_admin": is_admin, "message": "Acceso concedido" if is_admin else "Acceso denegado", "admin_panel_url": "/admin/dashboard" if is_admin else None}
+    return {"message": "Cosechado", "reward": round(reward, 2)}
 
 @app.get("/grupo/info")
-def get_grupo_info():
-    return {"grupo_id": GRUPO_TELEGRAM_ID, "mensaje": "Únete al grupo oficial para novedades y soporte", "boton_texto": "Unirse al Grupo"}
-
-# --- Polling de Telegram ---
-def run_telegram_polling():
-    if bot:
-        print("Iniciando polling de Telegram conectado a la base de datos en la nube...")
-        try:
-            # CORREGIDO: Agregado skip_pending=True para saltar los mensajes atrasados y evitar cuelgues de conexión
-            bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
-        except Exception as e:
-            print(f"Error en polling de Telegram: {e}")
+def get_grupo_info(): return {"grupo_id": GRUPO_TELEGRAM_ID}
 
 if __name__ == "__main__":
     import uvicorn
-    if bot:
-        bot_thread = threading.Thread(target=run_telegram_polling, daemon=True)
-        bot_thread.start()
-        
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
