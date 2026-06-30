@@ -9,23 +9,20 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- Configuración de Base de Datos ---
-DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:[72bGmBxf6qzb-iY]@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# --- Configuración de Base de Datos (Supabase en la nube) ---
+DATABASE_URL = "postgresql+psycopg2://postgres.rsqcsdheaibeuhjbxicn:[72bGmBxf6qzb-iY]@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+
+# Inicializamos el motor de PostgreSQL para Supabase
+engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
 TELEGRAM_BOT_TOKEN = "8206009148:AAFN8kiDJZ9yIxeIL3JWC00DBeWRHRjMMOw"
 ADMIN_ID = 6808824866
-
-# --- ESPACIOS PARA CONFIGURAR DESPUÉS ---
-# Reemplaza el ID ficticio por el ID real de tu grupo de Telegram (debe empezar con -100)
-GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))  
-# Reemplaza esta URL por el enlace directo a tu Mini App / Web App de Telegram
-MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/"     
+GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))
+MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/" 
 
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -64,13 +61,14 @@ class Transaction(Base):
     __tablename__ = "transactions"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    type = Column(String)  # "recarga" o "retiro"
+    type = Column(String)
     amount = Column(Float)
-    status = Column(String, default="pendiente")  # pendiente, aprobado, rechazado
+    status = Column(String, default="pendiente")
     created_at = Column(DateTime, default=datetime.utcnow)
     processed_at = Column(DateTime, nullable=True)
-    processed_by = Column(Integer, nullable=True)  # ID del admin que procesó
+    processed_by = Column(Integer, nullable=True)
 
+# Crea automáticamente las tablas en Supabase si no existen
 Base.metadata.create_all(bind=engine)
 
 # --- Definiciones ---
@@ -125,7 +123,6 @@ def get_db():
         db.close()
 
 def verify_admin(telegram_id: int, db: Session):
-    """Verifica si el usuario es administrador"""
     user = db.query(User).filter(User.telegram_id == telegram_id).first()
     if not user or not user.is_admin:
         raise HTTPException(status_code=403, detail="Acceso denegado. Solo administradores.")
@@ -133,41 +130,7 @@ def verify_admin(telegram_id: int, db: Session):
 
 app = FastAPI(title="GranjaP2P API")
 
-# --- LÓGICA DE ESCUCHA DE TELEGRAM (COMANDOS Y BOTONES) ---
-if bot:
-    @bot.message_handler(commands=['start'])
-    def handle_start_command(message):
-        chat_id = message.chat.id
-        first_name = message.from_user.first_name
-        
-        # Estructura del menú con botones integrados
-        markup = InlineKeyboardMarkup(row_width=2)
-        btn_play = InlineKeyboardButton(text="🎮 Jugar Ahora", url=MINI_APP_URL)
-        btn_group = InlineKeyboardButton(text="📢 Grupo Oficial", url=f"https://t.me/TuGrupoLink") 
-        btn_profile = InlineKeyboardButton(text="👤 Mi Perfil", callback_data="view_profile")
-        
-        markup.add(btn_play)
-        markup.add(btn_group, btn_profile)
-        
-        texto_bienvenida = (
-            f"¡Hola *{first_name}*! 🌾 Bienvenido a *FlowerLand*.\n\n"
-            "Gestiona tus tierras, siembra semillas y cosecha recompensas directamente desde nuestra app.\n"
-            "Selecciona una opción del menú interactivo:"
-        )
-        bot.send_message(chat_id, texto_bienvenida, reply_markup=markup, parse_mode="Markdown")
-
-    @bot.callback_query_handler(func=lambda call: True)
-    def handle_buttons_callback(call):
-        if call.data == "view_profile":
-            texto_perfil = (
-                f"👤 *Tu Perfil de Usuario*\n\n"
-                f"ID de Telegram: `{call.from_user.id}`\n"
-                "Para ver tu balance actual y tus tierras, abre la MiniApp usando el botón principal."
-            )
-            bot.answer_callback_query(call.id)
-            bot.send_message(call.message.chat.id, texto_perfil, parse_mode="Markdown")
-
-# --- Funciones de Telegram (Notificaciones) ---
+# --- Funciones de Telegram ---
 def send_telegram_notification(chat_id: int, message: str):
     if bot and chat_id:
         try:
@@ -263,6 +226,7 @@ def request_transaction(username: str, request: TransactionRequest, db: Session 
     
     msg = f"💰 *Nueva Solicitud*\nUsuario: {username}\nTipo: {request.type.upper()}\nMonto: {request.amount} LAN\nID: {transaction.id}"
     notify_admin(msg)
+    
     try:
         send_telegram_notification(GRUPO_TELEGRAM_ID, f"📢 Nueva solicitud de {request.type} por {username}")
     except:
@@ -465,21 +429,23 @@ def check_admin_status(telegram_id: int, db: Session = Depends(get_db)):
     is_admin = user and user.is_admin
     return {"is_admin": is_admin, "message": "Acceso concedido" if is_admin else "Acceso denegado", "admin_panel_url": "/admin/dashboard" if is_admin else None}
 
-# --- Botón de Grupo ---
 @app.get("/grupo/info")
 def get_grupo_info():
     return {"grupo_id": GRUPO_TELEGRAM_ID, "mensaje": "Únete al grupo oficial para novedades y soporte", "boton_texto": "Unirse al Grupo"}
 
-# --- FUNCIÓN EN HILO SECUNDARIO PARA EL BOT ---
-def run_bot():
+# --- Polling de Telegram ---
+def run_telegram_polling():
     if bot:
-        print("Bot de Telegram escuchando en segundo plano...")
-        bot.infinity_polling()
+        print("Iniciando polling de Telegram conectado a la base de datos en la nube...")
+        try:
+            bot.infinity_polling(timeout=20, long_polling_timeout=10)
+        except Exception as e:
+            print(f"Error en polling de Telegram: {e}")
 
 if __name__ == "__main__":
     import uvicorn
-    # Lanzamos el bot en un hilo paralelo para que no interfiera con FastAPI
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
+    if bot:
+        bot_thread = threading.Thread(target=run_telegram_polling, daemon=True)
+        bot_thread.start()
+        
     uvicorn.run(app, host="0.0.0.0", port=8000)
