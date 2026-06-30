@@ -1,12 +1,12 @@
 import random
 import os
 import threading
-import asyncio
-from datetime import datetime, timedelta
-from typing import Optional, List
+import time
+from datetime import datetime
+from typing import List
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Float, DateTime, ForeignKey, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import telebot
@@ -47,7 +47,9 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     lan_balance = Column(Float, default=0.0)
-    telegram_id = Column(Integer, nullable=True)
+    # FIX: Los IDs de Telegram (especialmente de grupos, ej. -100xxxxxxxxxx)
+    # exceden el rango de un Integer de 32 bits. Se usa BigInteger.
+    telegram_id = Column(BigInteger, nullable=True)
     is_admin = Column(Boolean, default=False)
 
 class Land(Base):
@@ -77,7 +79,8 @@ class Transaction(Base):
     status = Column(String, default="pendiente")
     created_at = Column(DateTime, default=datetime.utcnow)
     processed_at = Column(DateTime, nullable=True)
-    processed_by = Column(Integer, nullable=True)
+    # FIX: processed_by guarda un telegram_id de admin, también debe ser BigInteger
+    processed_by = Column(BigInteger, nullable=True)
 
 try:
     print("Verificando tablas en Supabase...")
@@ -173,6 +176,7 @@ if bot:
             bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=markup)
         except Exception as e:
             print(f"Error en comando start: {e}")
+            db.rollback()
         finally:
             # ESTA LÍNEA LIBERA LA CONEXIÓN PARA QUE NUNCA MÁS SE LLENE EL POOL
             db.close()
@@ -184,14 +188,32 @@ if bot:
 
 # --- Función de Polling del Bot ---
 def run_bot():
-    if bot:
-        print("🤖 [Telegram] Removiendo webhooks previos...")
+    if not bot:
+        return
+
+    print("🤖 [Telegram] Removiendo webhooks previos...")
+    try:
         bot.remove_webhook()
-        print("🤖 [Telegram] Iniciando polling seguro...")
+    except Exception as e:
+        print(f"⚠️ [Telegram] No se pudo remover webhook: {e}")
+
+    # FIX: Cuando Render despliega una nueva versión, la instancia vieja puede
+    # seguir corriendo unos segundos y chocar con la nueva (Error 409).
+    # Esperamos un momento y reintentamos el arranque del polling.
+    max_retries = 5
+    for intento in range(1, max_retries + 1):
         try:
+            print(f"🤖 [Telegram] Iniciando polling seguro... (intento {intento}/{max_retries})")
             bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
+            break  # infinity_polling solo retorna si se detiene limpiamente
         except Exception as e:
             print(f"❌ [Telegram] Error crítico en polling: {e}")
+            if "409" in str(e) or "Conflict" in str(e):
+                espera = 10 * intento
+                print(f"⏳ [Telegram] Posible instancia duplicada. Reintentando en {espera}s...")
+                time.sleep(espera)
+            else:
+                time.sleep(5)
 
 # --- Funciones de Notificaciones ---
 def send_telegram_notification(chat_id: int, message: str):
