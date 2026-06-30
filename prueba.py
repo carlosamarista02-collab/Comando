@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker, Session
 import telebot
 
 # --- Configuración de Base de Datos (Supabase en la nube) ---
-DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:lauD3DhVwYEEDPbt@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+DATABASE_URL = os.getenv "postgresql://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 
 # Inicializamos el motor de PostgreSQL para Supabase
 engine = create_engine(DATABASE_URL)
