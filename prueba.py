@@ -12,7 +12,7 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuración de Base de Datos ---
-DATABASE_URL = "sqlite:///./granja_p2p.db"
+DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:[72bGmBxf6qzb-iY]@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
