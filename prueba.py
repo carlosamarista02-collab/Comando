@@ -2,6 +2,7 @@ import random
 import os
 import threading
 import asyncio
+import atexit
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Depends
@@ -163,7 +164,7 @@ def run_bot():
         print("🤖 [Telegram] Iniciando polling del bot de forma segura...")
         try:
             bot.remove_webhook()
-            bot.infinity_polling(timeout=30, long_polling_timeout=15, skip_pending=True)
+            bot.infinity_polling(timeout=30, long_polling_timeout=15, skip_pending=True, drop_pending_updates=True)
         except Exception as e:
             print(f"❌ [Telegram] Error crítico en polling: {e}")
 
@@ -175,6 +176,13 @@ async def startup_event():
     thread.daemon = True
     thread.start()
     print("🚀 [FastAPI] Hilo de Telegram lanzado en segundo plano.")
+
+# Función para cerrar el bot correctamente
+@atexit.register
+def shutdown_handler():
+    if bot:
+        print("🛑 Cerrando bot de Telegram...")
+        bot.stop_polling()
 
 # --- Funciones de Notificaciones ---
 def send_telegram_notification(chat_id: int, message: str):
