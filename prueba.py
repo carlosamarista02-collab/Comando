@@ -25,7 +25,7 @@ ADMIN_ID = 6808824866
 # Reemplaza el ID ficticio por el ID real de tu grupo de Telegram (debe empezar con -100)
 GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))  
 # Reemplaza esta URL por el enlace directo a tu Mini App / Web App de Telegram
-MINI_APP_URL = "https://t.me/TuBot_bot/app_name"     
+MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/"     
 
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
