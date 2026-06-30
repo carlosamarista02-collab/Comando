@@ -4,5 +4,6 @@ pydantic
 sqlalchemy
 pyTelegramBotAPI==4.12.0
 python-dotenv
+psycopg2-binary==2.9.9
 
 
