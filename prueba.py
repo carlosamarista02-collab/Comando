@@ -2,7 +2,6 @@ import random
 import os
 import threading
 import asyncio
-import atexit
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Depends
@@ -158,31 +157,16 @@ if bot:
         help_text = "📌 *Comandos:*\n\n/start - Abrir app\n/help - Ayuda"
         bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
 
-# --- Polling Asíncrono Correcto para Render ---
+# --- Función de Polling del Bot ---
 def run_bot():
     if bot:
-        print("🤖 [Telegram] Iniciando polling del bot de forma segura...")
+        print("🤖 [Telegram] Removiendo webhooks previos...")
+        bot.remove_webhook()
+        print("🤖 [Telegram] Iniciando polling seguro y limpiando actualizaciones pendientes...")
         try:
-            bot.remove_webhook()
-            bot.infinity_polling(timeout=30, long_polling_timeout=15, skip_pending=True, drop_pending_updates=True)
+            bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
         except Exception as e:
             print(f"❌ [Telegram] Error crítico en polling: {e}")
-
-# --- Evento de Inicio Seguro de FastAPI ---
-@app.on_event("startup")
-async def startup_event():
-    # Esto arranca el bot de Telegram de fondo garantizando que Render no mate el proceso al encender Uvicorn
-    thread = threading.Thread(target=run_bot)
-    thread.daemon = True
-    thread.start()
-    print("🚀 [FastAPI] Hilo de Telegram lanzado en segundo plano.")
-
-# Función para cerrar el bot correctamente
-@atexit.register
-def shutdown_handler():
-    if bot:
-        print("🛑 Cerrando bot de Telegram...")
-        bot.stop_polling()
 
 # --- Funciones de Notificaciones ---
 def send_telegram_notification(chat_id: int, message: str):
@@ -237,7 +221,7 @@ def link_telegram(username: str, request: LinkTelegramRequest, db: Session = Dep
     user.telegram_id = request.telegram_id
     db.commit()
     notify_user(request.telegram_id, f"✅ ¡Hola {username}! Tu cuenta ha sido vinculada.")
-    return {"message": "Telegram vinculado correctamente"}
+    return {"message": "Telegram vinculada correctamente"}
 
 @app.post("/buy-land")
 def buy_land(request: BuyLandRequest, username: str, db: Session = Depends(get_db)):
@@ -291,7 +275,15 @@ def harvest_plant(plant_id: int, username: str, db: Session = Depends(get_db)):
 @app.get("/grupo/info")
 def get_grupo_info(): return {"grupo_id": GRUPO_TELEGRAM_ID}
 
+# --- Inicialización correcta en producción ---
 if __name__ == "__main__":
     import uvicorn
+    if bot:
+        # Arracamos primero el hilo del bot de manera desacoplada antes de congelar con Uvicorn
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        print("🚀 [Sistema] Hilo independiente del Bot inicializado.")
+        
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
