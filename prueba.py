@@ -1,4 +1,3 @@
-
 import random
 import os
 import threading
@@ -12,8 +11,6 @@ from sqlalchemy.orm import sessionmaker, Session
 import telebot
 
 # --- Configuración de Base de Datos (Supabase en la nube) ---
-# Corregido: Agregado el signo '=' y limpiado el os.getenv que causaba error de sintaxis.
-# También se cambia "postgres://" por "postgresql+psycopg2://" para asegurar total compatibilidad en Render.
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres")
 
 if DATABASE_URL.startswith("postgres://"):
@@ -25,7 +22,8 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # --- Configuración de Telegram ---
-TELEGRAM_BOT_TOKEN = "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY"
+# CORREGIDO: Leemos el token de forma segura desde las variables de Render para evitar conflictos de autenticación.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY")
 ADMIN_ID = 6808824866
 GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))
 MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/" 
@@ -75,7 +73,6 @@ class Transaction(Base):
     processed_by = Column(Integer, nullable=True)
 
 # --- PROTECCIÓN CRÍTICA PARA REINICIOS EN RENDER ---
-# Evita por completo el error 'relation "users" already exists' al arrancar el servidor.
 try:
     print("Verificando tablas en Supabase...")
     Base.metadata.create_all(bind=engine)
@@ -320,7 +317,8 @@ def buy_land(request: BuyLandRequest, username: str, db: Session = Depends(get_d
     
     slots_map = {"Comun": 4, "Rara": 8, "Legendaria": 12}
     user.lan_balance -= price
-    new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type], is_free_land=False)
+    
+    # CORREGIDO: Eliminada la línea duplicada de creación de Land
     new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type], is_free_land=False)
     db.add(new_land)
     db.commit()
@@ -451,7 +449,8 @@ def run_telegram_polling():
     if bot:
         print("Iniciando polling de Telegram conectado a la base de datos en la nube...")
         try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=10)
+            # CORREGIDO: Agregado skip_pending=True para saltar los mensajes atrasados y evitar cuelgues de conexión
+            bot.infinity_polling(timeout=20, long_polling_timeout=10, skip_pending=True)
         except Exception as e:
             print(f"Error en polling de Telegram: {e}")
 
@@ -462,3 +461,4 @@ if __name__ == "__main__":
         bot_thread.start()
         
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
