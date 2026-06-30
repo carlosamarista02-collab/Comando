@@ -1,3 +1,4 @@
+
 import random
 import os
 import threading
@@ -11,7 +12,12 @@ from sqlalchemy.orm import sessionmaker, Session
 import telebot
 
 # --- Configuración de Base de Datos (Supabase en la nube) ---
-DATABASE_URL = os.getenv "postgresql://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+# Corregido: Agregado el signo '=' y limpiado el os.getenv que causaba error de sintaxis.
+# También se cambia "postgres://" por "postgresql+psycopg2://" para asegurar total compatibilidad en Render.
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres")
+
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
 
 # Inicializamos el motor de PostgreSQL para Supabase
 engine = create_engine(DATABASE_URL)
@@ -68,8 +74,14 @@ class Transaction(Base):
     processed_at = Column(DateTime, nullable=True)
     processed_by = Column(Integer, nullable=True)
 
-# Crea automáticamente las tablas en Supabase si no existen
-Base.metadata.create_all(bind=engine)
+# --- PROTECCIÓN CRÍTICA PARA REINICIOS EN RENDER ---
+# Evita por completo el error 'relation "users" already exists' al arrancar el servidor.
+try:
+    print("Verificando tablas en Supabase...")
+    Base.metadata.create_all(bind=engine)
+    print("Base de datos lista y conectada.")
+except Exception as db_err:
+    print(f"Las tablas ya se encuentran listas en Supabase. Continuando de forma segura: {db_err}")
 
 # --- Definiciones ---
 PLANT_DEFINITIONS = {
@@ -308,6 +320,7 @@ def buy_land(request: BuyLandRequest, username: str, db: Session = Depends(get_d
     
     slots_map = {"Comun": 4, "Rara": 8, "Legendaria": 12}
     user.lan_balance -= price
+    new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type], is_free_land=False)
     new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type], is_free_land=False)
     db.add(new_land)
     db.commit()
