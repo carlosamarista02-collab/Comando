@@ -1,481 +1,502 @@
-import random
-import os
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+import requests
+import json
+from datetime import datetime
 import threading
 import time
-from datetime import datetime
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Depends, Body, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Float, DateTime, ForeignKey, Boolean, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# --- Configuración de Base de Datos ---
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres.rsqcsdheaibeuhjbxicn:s1vwz36ddTBKPaUv@aws-1-us-west-2.pooler.supabase.com:6543/postgres")
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+# ============ CONFIGURACIÓN ============
+BOT_TOKEN = "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY"
+ADMIN_ID = 6808824866
+API_URL = "http://localhost:8000"
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=20,
-    max_overflow=30,
-    pool_recycle=1800,
-    pool_pre_ping=True
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- Configuración de Telegram ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY")
-ADMIN_ID = 6808824866  # <-- Tu Telegram ID
-MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/"
+# ============ BASE DE DATOS LOCAL (para respaldo) ============
+class LocalDB:
+    def __init__(self):
+        self.users = {}
+        self.wallet_requests = {}
+        self.p2p_listings = {}
+    
+    def get_user(self, telegram_id):
+        return self.users.get(str(telegram_id))
+    
+    def save_user(self, user_data):
+        self.users[str(user_data['telegram_id'])] = user_data
+        return user_data
+    
+    def create_wallet_request(self, request_data):
+        request_id = len(self.wallet_requests) + 1
+        request_data['id'] = request_id
+        request_data['status'] = 'pending'
+        request_data['created_at'] = datetime.utcnow().isoformat()
+        self.wallet_requests[str(request_id)] = request_data
+        return request_data
+    
+    def get_pending_requests(self):
+        return [r for r in self.wallet_requests.values() if r['status'] == 'pending']
+    
+    def get_request(self, request_id):
+        return self.wallet_requests.get(str(request_id))
+    
+    def update_request(self, request_id, status):
+        if str(request_id) in self.wallet_requests:
+            self.wallet_requests[str(request_id)]['status'] = status
+            self.wallet_requests[str(request_id)]['updated_at'] = datetime.utcnow().isoformat()
+            return self.wallet_requests[str(request_id)]
+        return None
 
-try:
-    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-except Exception as e:
-    print(f"Error inicializando el bot de Telegram: {e}")
-    bot = None
+db = LocalDB()
 
-# --- Modelos de Base de Datos ---
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    lan_balance = Column(Float, default=0.0)
-    usdt_balance = Column(Float, default=0.0)
-    telegram_id = Column(BigInteger, nullable=True)
-    is_admin = Column(Boolean, default=False)
-
-class Land(Base):
-    __tablename__ = "lands"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    type = Column(String)
-    slots_total = Column(Integer)
-    is_free_land = Column(Boolean, default=False)
-
-class Plant(Base):
-    __tablename__ = "plants"
-    id = Column(Integer, primary_key=True, index=True)
-    land_id = Column(Integer, ForeignKey("lands.id"))
-    name = Column(String)
-    rarity = Column(String)
-    total_time_hours = Column(Float)
-    start_time = Column(DateTime, default=datetime.utcnow)
-    is_harvested = Column(Boolean, default=False)
-
-class Transaction(Base):
-    __tablename__ = "transactions"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    type = Column(String)  # recarga, retiro
-    amount = Column(Float)
-    status = Column(String, default="pendiente")  # pendiente, aprobado, rechazado
-    created_at = Column(DateTime, default=datetime.utcnow)
-    processed_at = Column(DateTime, nullable=True)
-    processed_by = Column(BigInteger, nullable=True)
-    payment_method = Column(String, nullable=True)
-    proof_hash = Column(Text, nullable=True)
-    wallet_address = Column(Text, nullable=True)  # Para retiros
-
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception as db_err:
-    print(f"Error en tablas de Supabase: {db_err}")
-
-# --- Definiciones del Juego ---
-PLANT_DEFINITIONS = {
-    "Comun": {"min_time": 1, "max_time": 4, "price": 5, "lan_reward_min": 10, "lan_reward_max": 20},
-    "PocoComun": {"min_time": 5, "max_time": 12, "price": 15, "lan_reward_min": 30, "lan_reward_max": 50},
-    "Epica": {"min_time": 13, "max_time": 24, "price": 40, "lan_reward_min": 80, "lan_reward_max": 150},
-    "Legendaria": {"min_time": 25, "max_time": 72, "price": 100, "lan_reward_min": 200, "lan_reward_max": 500}
-}
-LAND_PRICES = {"Comun": 10, "Rara": 30, "Legendaria": 80}
-
-# --- Pydantic Models ---
-class TransactionRequest(BaseModel):
-    type: str
-    amount: float
-    payment_method: Optional[str] = "USDT TRC20"
-    proof_hash: Optional[str] = ""
-    wallet_address: Optional[str] = ""  # Para retiros
-
-class BuyLandRequest(BaseModel):
-    land_type: str
-
-class PlantSeedRequest(BaseModel):
-    land_id: int
-    rarity: str
-
-class LinkTelegramRequest(BaseModel):
-    telegram_id: int
-
-def get_db():
-    db = SessionLocal()
+# ============ FUNCIONES DE API ============
+def api_request(method, endpoint, data=None):
+    """Función para hacer peticiones a la API"""
+    url = f"{API_URL}{endpoint}"
     try:
-        yield db
-    finally:
-        db.close()
+        if method == 'GET':
+            response = requests.get(url, timeout=5)
+        elif method == 'POST':
+            response = requests.post(url, json=data, timeout=5)
+        elif method == 'PUT':
+            response = requests.put(url, json=data, timeout=5)
+        else:
+            return None
+        
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except:
+        return None
 
-def calculate_progress(plant: Plant):
-    elapsed = datetime.utcnow() - plant.start_time
-    elapsed_hours = elapsed.total_seconds() / 3600
-    progress = min(100, (elapsed_hours / plant.total_time_hours) * 100)
-    remaining = max(0, plant.total_time_hours - elapsed_hours)
-    return round(progress, 2), round(remaining, 2), progress >= 99.9
-
-def get_random_plant_name(rarity: str):
-    names = {
-        "Comun": ["Tomate", "Lechuga", "Zanahoria"],
-        "PocoComun": ["Fresa", "Pimiento", "Cebolla"],
-        "Epica": ["Orquídea", "Girasol Gigante", "Cactus Dorado"],
-        "Legendaria": ["Árbol Eterno", "Flor Lunar", "Raíz Ancestral"]
+def get_user_from_api(telegram_id):
+    """Obtener usuario de la API o crearlo si no existe"""
+    # Intentar obtener de la API
+    user = api_request('GET', f'/api/users/{telegram_id}')
+    if user:
+        db.save_user(user)
+        return user
+    
+    # Si no existe, crearlo
+    user_data = {
+        'telegram_id': telegram_id,
+        'telegram_username': None,
+        'telegram_name': None,
+        'balance_usdt': 0.0,
+        'balance_stars': 0.0,
+        'ships': [],
+        'aliens': [],
+        'planets': [],
+        'fuel_available': 0,
+        'has_done_expedition': False,
+        'active_contract': None
     }
-    return random.choice(names.get(rarity, ["Planta"]))
+    created = api_request('POST', '/api/users', user_data)
+    if created:
+        db.save_user(created)
+        return created
+    return user_data
 
-# --- FastAPI App ---
-app = FastAPI(title="GranjaP2P API")
+# ============ COMANDOS PRINCIPALES ============
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or "Usuario"
+    name = message.from_user.first_name or ""
+    
+    # Registrar usuario
+    user_data = {
+        'telegram_id': user_id,
+        'telegram_username': username,
+        'telegram_name': name
+    }
+    api_request('POST', '/api/users', user_data)
+    db.save_user(user_data)
+    
+    # Crear teclado con botón Play
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    play_btn = KeyboardButton("🎮 PLAY")
+    profile_btn = KeyboardButton("📋 Perfil")
+    balance_btn = KeyboardButton("💰 Saldo")
+    keyboard.add(play_btn, profile_btn, balance_btn)
+    
+    # Si es admin, agregar botón de admin
+    if user_id == ADMIN_ID:
+        admin_btn = KeyboardButton("🔐 Panel Admin")
+        keyboard.add(admin_btn)
+    
+    welcome_text = f"""
+🚀 *¡Bienvenido a XENOPORT, Capitán {name}!*
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+Tu aventura espacial comienza aquí. 
+Explora el universo, recolecta naves y alienígenas.
 
-# --- Helpers ---
-def send_telegram_notification(chat_id: int, message: str, reply_markup=None):
-    if bot and chat_id:
-        try:
-            bot.send_message(chat_id, message, parse_mode="Markdown", reply_markup=reply_markup)
-        except Exception as e:
-            print(f"Error notif a {chat_id}: {e}")
+🌌 *¡Que la fuerza te acompañe!*
+"""
+    
+    bot.send_message(
+        message.chat.id, 
+        welcome_text, 
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
 
-def notify_admin(message: str, reply_markup=None):
-    send_telegram_notification(ADMIN_ID, message, reply_markup)
+@bot.message_handler(func=lambda message: message.text == "🎮 PLAY")
+def play_button(message):
+    # Crear botón con URL del juego
+    keyboard = InlineKeyboardMarkup()
+    play_btn = InlineKeyboardButton("🚀 ABRIR XENOPORT", url="https://tu-dominio.com/index.html")
+    keyboard.add(play_btn)
+    
+    bot.send_message(
+        message.chat.id,
+        "🛸 *Prepárate para la aventura espacial!*\n\nHaz clic en el botón para comenzar:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
 
-# --- Telegram Bot Logic ---
-if bot:
-    @bot.message_handler(commands=['start'])
-    def send_welcome(message):
-        chat_id = message.chat.id
-        tg_username = message.from_user.username or f"user_{chat_id}"
-        first_name = message.from_user.first_name
+@bot.message_handler(func=lambda message: message.text == "📋 Perfil")
+def profile_button(message):
+    user_id = message.from_user.id
+    
+    # Intentar obtener de API
+    user = api_request('GET', f'/api/users/{user_id}')
+    if not user:
+        user = db.get_user(user_id)
+    
+    if not user:
+        bot.send_message(message.chat.id, "❌ No se pudo obtener tu perfil")
+        return
+    
+    ships_count = len(user.get('ships', []))
+    aliens_count = len(user.get('aliens', []))
+    
+    profile_text = f"""
+📋 *Tu Perfil*
 
-        db = SessionLocal()
-        try:
-            user = db.query(User).filter(User.telegram_id == chat_id).first()
-            if not user:
-                user = User(username=tg_username, telegram_id=chat_id, lan_balance=0.0, usdt_balance=0.0)
-                db.add(user)
-                db.commit()
+🆔 ID: {user.get('telegram_id')}
+👤 Nombre: {user.get('telegram_name', 'Sin nombre')}
+🐦 Usuario: @{user.get('telegram_username', 'sin usuario')}
+
+💰 *Saldo:*
+💠 USDT: {user.get('balance_usdt', 0):.2f}
+⭐ Stars: {user.get('balance_stars', 0):.0f}
+⛽ Combustible: {user.get('fuel_available', 0):.0f}
+
+🚀 *Inventario:*
+Naves: {ships_count}
+Aliens: {aliens_count}
+
+📅 Miembro desde: {user.get('created_at', '')[:10] if user.get('created_at') else 'N/A'}
+"""
+    bot.send_message(message.chat.id, profile_text, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda message: message.text == "💰 Saldo")
+def balance_button(message):
+    user_id = message.from_user.id
+    
+    user = api_request('GET', f'/api/users/{user_id}')
+    if not user:
+        user = db.get_user(user_id)
+    
+    if not user:
+        bot.send_message(message.chat.id, "❌ No se pudo obtener tu saldo")
+        return
+    
+    balance_text = f"""
+💰 *Tu Saldo*
+
+💠 *USDT:* {user.get('balance_usdt', 0):.2f}
+⭐ *Stars:* {user.get('balance_stars', 0):.0f}
+⛽ *Combustible:* {user.get('fuel_available', 0):.0f}
+
+📊 *Total de activos:*
+🚀 Naves: {len(user.get('ships', []))}
+👾 Aliens: {len(user.get('aliens', []))}
+"""
+    bot.send_message(message.chat.id, balance_text, parse_mode='Markdown')
+
+# ============ PANEL DE ADMINISTRACIÓN ============
+@bot.message_handler(func=lambda message: message.text == "🔐 Panel Admin")
+def admin_panel_button(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "❌ No tienes permisos de administrador")
+        return
+    
+    show_admin_panel(message.chat.id)
+
+def show_admin_panel(chat_id):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("📋 Solicitudes Pendientes", callback_data="admin_pending"),
+        InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats")
+    )
+    keyboard.add(
+        InlineKeyboardButton("👥 Usuarios", callback_data="admin_users"),
+        InlineKeyboardButton("📦 Listados P2P", callback_data="admin_p2p")
+    )
+    keyboard.add(
+        InlineKeyboardButton("🔄 Sincronizar", callback_data="admin_sync")
+    )
+    
+    bot.send_message(
+        chat_id,
+        "🔐 *Panel de Administración de XENOPORT*\n\nSelecciona una opción:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+# ============ CALLBACKS DEL ADMIN ============
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
+def handle_admin_callbacks(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ No tienes permisos")
+        return
+    
+    if call.data == "admin_pending":
+        show_pending_requests(call.message)
+    
+    elif call.data == "admin_stats":
+        show_stats(call.message)
+    
+    elif call.data == "admin_users":
+        show_users(call.message)
+    
+    elif call.data == "admin_p2p":
+        show_p2p_listings(call.message)
+    
+    elif call.data == "admin_sync":
+        bot.answer_callback_query(call.id, "🔄 Sincronizando datos...")
+        # Aquí se puede agregar lógica de sincronización
+        bot.send_message(call.message.chat.id, "✅ Datos sincronizados correctamente")
+    
+    bot.answer_callback_query(call.id)
+
+# ============ SOLICITUDES PENDIENTES ============
+def show_pending_requests(message):
+    # Intentar obtener de API
+    requests_data = api_request('GET', '/api/wallet-requests/pending')
+    if not requests_data:
+        # Usar datos locales
+        requests_data = db.get_pending_requests()
+    
+    if not requests_data:
+        bot.send_message(message.chat.id, "✅ No hay solicitudes pendientes")
+        return
+    
+    # Enviar cada solicitud con botones de acción
+    for req in requests_data:
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            InlineKeyboardButton("✅ Aprobar", callback_data=f"approve_{req['id']}"),
+            InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{req['id']}")
+        )
+        
+        text = f"""
+📋 *Solicitud #{req['id']}*
+👤 Usuario: {req.get('telegram_name', 'Desconocido')}
+🆔 ID: {req.get('telegram_id')}
+📊 Tipo: {req.get('type', 'N/A').upper()}
+💰 Monto: {req.get('amount', 0)} {req.get('currency', 'USDT')}
+🔗 Red: {req.get('network', 'N/A')}
+📝 TXID: {req.get('txid', 'N/A')}
+📅 Fecha: {req.get('created_at', '')[:16] if req.get('created_at') else 'N/A'}
+"""
+        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=keyboard)
+
+# ============ APROBAR/RECHAZAR SOLICITUDES ============
+@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('reject_'))
+def handle_request_action(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ No tienes permisos")
+        return
+    
+    parts = call.data.split('_')
+    action = parts[0]
+    request_id = int(parts[1])
+    
+    # Intentar actualizar en API
+    result = api_request('PUT', f'/api/wallet-requests/{request_id}', {"status": action})
+    
+    if not result:
+        # Usar base de datos local
+        result = db.update_request(request_id, action)
+    
+    if result:
+        # Obtener la solicitud para notificar al usuario
+        req = api_request('GET', f'/api/wallet-requests/{request_id}')
+        if not req:
+            req = db.get_request(request_id)
+        
+        if req:
+            user_id = req.get('telegram_id')
+            amount = req.get('amount', 0)
+            currency = req.get('currency', 'USDT')
+            
+            if action == 'approved':
+                # Notificar al usuario
+                text = f"""
+✅ *¡Tu solicitud #{request_id} ha sido APROBADA!*
+
+💰 Monto: {amount} {currency}
+💠 Tu saldo ha sido actualizado.
+
+¡Gracias por confiar en XENOPORT! 🚀
+"""
+                try:
+                    bot.send_message(user_id, text, parse_mode='Markdown')
+                except:
+                    pass
+                
+                bot.edit_message_text(
+                    f"✅ Solicitud #{request_id} APROBADA correctamente",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
             else:
-                if user.telegram_id != chat_id:
-                    user.telegram_id = chat_id
-                    db.commit()
+                # Notificar al usuario
+                text = f"""
+❌ *Tu solicitud #{request_id} ha sido RECHAZADA*
 
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton(text="🌾 Jugar FlowerLand", web_app=WebAppInfo(url=MINI_APP_URL)))
+💰 Monto: {amount} {currency}
+📝 Motivo: Revisión manual no aprobada.
 
-            welcome_text = f"¡Hola *{first_name}*! 👋\nBienvenido a *FlowerLand*.\nPresiona el botón para jugar."
-            bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=markup)
-        except Exception as e:
-            print(f"Error start: {e}")
-        finally:
-            db.close()
-
-    # --- HANDLERS DE BOTONES INLINE (APROBAR / RECHAZAR) ---
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("approve_") or call.data.startswith("reject_"))
-    def handle_transaction_decision(call):
-        chat_id = call.message.chat.id
-        
-        # Verificar que sea el admin
-        if chat_id != ADMIN_ID:
-            bot.answer_callback_query(call.id, "⛔ No autorizado", show_alert=True)
-            return
-
-        action, tx_id_str = call.data.split("_", 1)
-        tx_id = int(tx_id_str)
-        
-        db = SessionLocal()
-        try:
-            transaction = db.query(Transaction).filter(Transaction.id == tx_id).first()
-            if not transaction or transaction.status != "pendiente":
-                bot.answer_callback_query(call.id, "⚠️ Transacción ya procesada o no existe", show_alert=True)
-                return
-
-            user = db.query(User).filter(User.id == transaction.user_id).first()
-            if not user:
-                bot.answer_callback_query(call.id, "⚠️ Usuario no encontrado", show_alert=True)
-                return
-
-            if action == "approve":
-                transaction.status = "aprobado"
-                transaction.processed_at = datetime.utcnow()
-                transaction.processed_by = chat_id
-
-                if transaction.type == "recarga":
-                    user.usdt_balance += transaction.amount
-                    msg_user = f"✅ *Recarga Aprobada*\nSe han acreditado *{transaction.amount} USDT* a tu saldo."
-                elif transaction.type == "retiro":
-                    if user.usdt_balance < transaction.amount:
-                        bot.answer_callback_query(call.id, "⚠️ Saldo insuficiente del usuario", show_alert=True)
-                        return
-                    user.usdt_balance -= transaction.amount
-                    msg_user = f"✅ *Retiro Aprobado*\nSe han retirado *{transaction.amount} USDT*. Recibirás tus fondos pronto."
-
-                # Editar el mensaje del admin para que vea que fue aprobado
+Por favor, contacta con soporte para más información.
+"""
+                try:
+                    bot.send_message(user_id, text, parse_mode='Markdown')
+                except:
+                    pass
+                
                 bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=call.message.message_id,
-                    text=f"✅ *APROBADA* #{transaction.id}\nUsuario: `{user.username}`\nTipo: {transaction.type.upper()}\nMonto: {transaction.amount}\nMétodo: {transaction.payment_method}",
-                    parse_mode="Markdown"
+                    f"❌ Solicitud #{request_id} RECHAZADA",
+                    call.message.chat.id,
+                    call.message.message_id
                 )
-                bot.answer_callback_query(call.id, "✅ Transacción APROBADA", show_alert=True)
+    else:
+        bot.answer_callback_query(call.id, "❌ Error al procesar la solicitud")
 
-            elif action == "reject":
-                transaction.status = "rechazado"
-                transaction.processed_at = datetime.utcnow()
-                transaction.processed_by = chat_id
-                msg_user = f"❌ Tu solicitud #{transaction.id} de {transaction.type} por {transaction.amount} ha sido RECHAZADA."
+# ============ ESTADÍSTICAS ============
+def show_stats(message):
+    stats = api_request('GET', '/api/stats')
+    
+    if not stats:
+        # Estadísticas locales
+        users = db.users
+        pending = len(db.get_pending_requests())
+        stats = {
+            'total_users': len(users),
+            'total_ships': 0,
+            'total_aliens': 0,
+            'total_usdt': 0,
+            'total_stars': 0,
+            'active_listings': 0,
+            'pending_requests': pending
+        }
+        for user in users.values():
+            stats['total_ships'] += len(user.get('ships', []))
+            stats['total_aliens'] += len(user.get('aliens', []))
+            stats['total_usdt'] += user.get('balance_usdt', 0)
+            stats['total_stars'] += user.get('balance_stars', 0)
+    
+    text = f"""
+📊 *Estadísticas de XENOPORT*
 
-                bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=call.message.message_id,
-                    text=f"❌ *RECHAZADA* #{transaction.id}\nUsuario: `{user.username}`\nTipo: {transaction.type.upper()}\nMonto: {transaction.amount}",
-                    parse_mode="Markdown"
-                )
-                bot.answer_callback_query(call.id, "❌ Transacción RECHAZADA", show_alert=True)
+👥 *Usuarios:* {stats.get('total_users', 0)}
+🚀 *Naves totales:* {stats.get('total_ships', 0)}
+👾 *Aliens totales:* {stats.get('total_aliens', 0)}
 
-            db.commit()
+💰 *Economía:*
+💠 USDT en circulación: {stats.get('total_usdt', 0):.2f}
+⭐ Stars en circulación: {stats.get('total_stars', 0):.0f}
 
-            # Notificar al usuario
-            if user.telegram_id:
-                send_telegram_notification(user.telegram_id, msg_user)
+📦 *Mercado P2P:* {stats.get('active_listings', 0)} activos
+📋 *Solicitudes pendientes:* {stats.get('pending_requests', 0)}
+"""
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-        except Exception as e:
-            print(f"Error en callback: {e}")
-            bot.answer_callback_query(call.id, f"Error: {str(e)}", show_alert=True)
-        finally:
-            db.close()
+# ============ USUARIOS ============
+def show_users(message):
+    users = api_request('GET', '/api/users')
+    if not users:
+        users = list(db.users.values())
+    
+    if not users:
+        bot.send_message(message.chat.id, "👥 No hay usuarios registrados")
+        return
+    
+    text = "👥 *Usuarios Registrados*\n\n"
+    for user in users[:15]:
+        name = user.get('telegram_name', 'Usuario')
+        username = user.get('telegram_username', '')
+        usdt = user.get('balance_usdt', 0)
+        stars = user.get('balance_stars', 0)
+        ships = len(user.get('ships', []))
+        aliens = len(user.get('aliens', []))
+        
+        text += f"• {name} (@{username}) - 💠{usdt:.2f} ⭐{stars:.0f} 🚀{ships} 👾{aliens}\n"
+    
+    if len(users) > 15:
+        text += f"\n... y {len(users) - 15} más"
+    
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-    def run_bot():
-        if not bot: return
-        print("🤖 [Telegram] Iniciando polling...")
-        bot.infinity_polling(timeout=30, long_polling_timeout=20, skip_pending=True)
+# ============ LISTADOS P2P ============
+def show_p2p_listings(message):
+    listings = api_request('GET', '/api/p2p/listings/active')
+    
+    if not listings:
+        bot.send_message(message.chat.id, "📦 No hay listados P2P activos")
+        return
+    
+    text = "📦 *Listados P2P Activos*\n\n"
+    for l in listings[:10]:
+        name = l.get('name', 'Desconocido')
+        rarity = l.get('rarity', 'Común')
+        price = l.get('price', 0)
+        seller = l.get('seller_name', 'Anónimo')
+        item_type = l.get('type', 'item').upper()
+        
+        text += f"• {name} ({rarity}) - 💠{price:.2f} - {item_type} - Vendedor: @{seller}\n"
+    
+    if len(listings) > 10:
+        text += f"\n... y {len(listings) - 10} más"
+    
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# --- Endpoints API ---
+# ============ MENSAJES POR DEFECTO ============
+@bot.message_handler(func=lambda message: True)
+def default_message(message):
+    if message.text and message.text.startswith('/'):
+        return
+    
+    # Mensaje de ayuda para texto no reconocido
+    help_text = """
+❓ *Comandos disponibles:*
 
-@app.get("/user-data/{telegram_id}")
-def get_user_data(telegram_id: int, db: Session = Depends(get_db)):
-    """Devuelve TODOS los datos reales del usuario desde la BD"""
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        # Auto-registro
-        user = User(username=f"user_{telegram_id}", telegram_id=telegram_id, lan_balance=0.0, usdt_balance=0.0)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
+🎮 *PLAY* - Abrir el juego
+📋 *Perfil* - Ver tu perfil
+💰 *Saldo* - Ver tu saldo
+🔐 *Panel Admin* - Panel de administración (solo admin)
 
-    # Tierras reales
-    lands = db.query(Land).filter(Land.user_id == user.id).all()
-    lands_data = []
-    for l in lands:
-        # Contar plantas activas en esta tierra
-        plants_count = db.query(Plant).filter(Plant.land_id == l.id, Plant.is_harvested == False).count()
-        lands_data.append({
-            "id": l.id,
-            "type": l.type,
-            "slots_total": l.slots_total,
-            "is_free_land": l.is_free_land,
-            "plants_count": plants_count
-        })
+O usa los botones del menú.
+"""
+    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-    # Historial de transacciones reales
-    transactions = db.query(Transaction).filter(Transaction.user_id == user.id).order_by(Transaction.created_at.desc()).limit(20).all()
-    tx_data = [{
-        "id": t.id,
-        "type": t.type,
-        "amount": t.amount,
-        "status": t.status,
-        "method": t.payment_method,
-        "created_at": t.created_at.isoformat() if t.created_at else None
-    } for t in transactions]
+# ============ INICIAR EL BOT ============
+def run_bot():
+    print("🚀 Bot de XENOPORT iniciado...")
+    print(f"🤖 Token: {BOT_TOKEN[:10]}...")
+    print(f"👤 Admin ID: {ADMIN_ID}")
+    print("✅ Bot listo para usar!")
+    
+    try:
+        bot.polling(non_stop=True, interval=1, timeout=30)
+    except Exception as e:
+        print(f"❌ Error en el bot: {e}")
+        time.sleep(5)
+        run_bot()
 
-    return {
-        "username": user.username,
-        "telegram_id": user.telegram_id,
-        "lan_balance": user.lan_balance,
-        "usdt_balance": user.usdt_balance,
-        "lands": lands_data,
-        "transactions": tx_data
-    }
-
-@app.post("/transaction/request/{telegram_id}")
-def request_transaction(telegram_id: int, request: TransactionRequest, db: Session = Depends(get_db)):
-    """Crea la transacción y envía mensaje al admin con botones Aceptar/Rechazar"""
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado. Abre el bot primero con /start")
-
-    if request.type not in ["recarga", "retiro"] or request.amount <= 0:
-        raise HTTPException(status_code=400, detail="Monto o tipo inválido")
-
-    # Validar saldo para retiros
-    if request.type == "retiro" and user.usdt_balance < request.amount:
-        raise HTTPException(status_code=400, detail=f"Saldo insuficiente. Tienes {user.usdt_balance} USDT")
-
-    transaction = Transaction(
-        user_id=user.id,
-        type=request.type,
-        amount=request.amount,
-        status="pendiente",
-        payment_method=request.payment_method,
-        proof_hash=request.proof_hash,
-        wallet_address=request.wallet_address
-    )
-    db.add(transaction)
-    db.commit()
-    db.refresh(transaction)
-
-    # --- MENSAJE AL ADMIN CON BOTONES INLINE ---
-    msg = (
-        f"💰 *Nueva Solicitud #{transaction.id}*\n"
-        f"👤 Usuario: `{user.username}`\n"
-        f"🔢 Telegram ID: `{user.telegram_id}`\n"
-        f"📋 Tipo: *{request.type.upper()}*\n"
-        f"💵 Monto: *{request.amount} USDT*\n"
-        f"💳 Método: {request.payment_method}\n"
-    )
-    if request.proof_hash:
-        msg += f"🧾 Hash/Comprobante:\n`{request.proof_hash}`\n"
-    if request.wallet_address:
-        msg += f"📍 Wallet destino:\n`{request.wallet_address}`\n"
-
-    markup = InlineKeyboardMarkup()
-    markup.add(
-        InlineKeyboardButton("✅ Aprobar", callback_data=f"approve_{transaction.id}"),
-        InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{transaction.id}")
-    )
-
-    notify_admin(msg, reply_markup=markup)
-
-    return {
-        "message": "Solicitud enviada al administrador. Recibirás notificación en Telegram.",
-        "transaction_id": transaction.id
-    }
-
-@app.post("/buy-land/{telegram_id}")
-def buy_land(telegram_id: int, request: BuyLandRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    price = LAND_PRICES.get(request.land_type)
-    if not price:
-        raise HTTPException(status_code=400, detail="Tipo de tierra inválido")
-    if user.usdt_balance < price:
-        raise HTTPException(status_code=400, detail=f"Saldo insuficiente. Necesitas {price} USDT")
-
-    slots_map = {"Comun": 4, "Rara": 8, "Legendaria": 12}
-    user.usdt_balance -= price
-
-    new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type])
-    db.add(new_land)
-    db.commit()
-
-    return {"message": "Tierra comprada", "new_balance": user.usdt_balance}
-
-@app.post("/plant-seed/{telegram_id}")
-def plant_seed(telegram_id: int, request: PlantSeedRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    land = db.query(Land).filter(Land.id == request.land_id, Land.user_id == user.id).first()
-    rarity_config = PLANT_DEFINITIONS.get(request.rarity)
-    if not land or not rarity_config:
-        raise HTTPException(status_code=400, detail="Datos inválidos")
-    if user.lan_balance < rarity_config["price"]:
-        raise HTTPException(status_code=400, detail="Saldo LAN insuficiente")
-
-    random_time = random.uniform(rarity_config["min_time"], rarity_config["max_time"])
-    new_plant = Plant(
-        land_id=request.land_id,
-        name=get_random_plant_name(request.rarity),
-        rarity=request.rarity,
-        total_time_hours=random_time
-    )
-    user.lan_balance -= rarity_config["price"]
-    db.add(new_plant)
-    db.commit()
-
-    return {"message": "Planta sembrada", "plant_id": new_plant.id}
-
-@app.get("/plants/{telegram_id}")
-def get_plants(telegram_id: int, db: Session = Depends(get_db)):
-    """Devuelve plantas reales del usuario"""
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        return []
-
-    user_lands = db.query(Land).filter(Land.user_id == user.id).all()
-    land_ids = [l.id for l in user_lands]
-    if not land_ids:
-        return []
-
-    plants = db.query(Plant).filter(Plant.land_id.in_(land_ids), Plant.is_harvested == False).all()
-    result = []
-    for p in plants:
-        progress, remaining, is_ready = calculate_progress(p)
-        land = db.query(Land).filter(Land.id == p.land_id).first()
-        result.append({
-            "id": p.id,
-            "land_id": p.land_id,
-            "name": p.name,
-            "rarity": p.rarity,
-            "total_time_hours": p.total_time_hours,
-            "progress_percent": progress,
-            "time_remaining_hours": remaining,
-            "is_ready": is_ready,
-            "land_type": land.type if land else "Desconocida"
-        })
-    return result
-
-@app.post("/harvest/{plant_id}/{telegram_id}")
-def harvest_plant(plant_id: int, telegram_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    plant = db.query(Plant).filter(Plant.id == plant_id).first()
-    if not plant:
-        raise HTTPException(status_code=404, detail="Planta no encontrada")
-
-    land = db.query(Land).filter(Land.id == plant.land_id, Land.user_id == user.id).first()
-    if not land:
-        raise HTTPException(status_code=403, detail="No eres dueño de esta planta")
-
-    progress, remaining, is_ready = calculate_progress(plant)
-    if not is_ready:
-        raise HTTPException(status_code=400, detail="Cultivo no listo")
-
-    reward = random.uniform(PLANT_DEFINITIONS[plant.rarity]["lan_reward_min"], PLANT_DEFINITIONS[plant.rarity]["lan_reward_max"])
-    user.lan_balance += reward
-    plant.is_harvested = True
-    db.commit()
-
-    return {"message": "Cosechado", "reward": round(reward, 2), "new_lan_balance": user.lan_balance}
-
-# --- Inicialización ---
 if __name__ == "__main__":
-    import uvicorn
-    if bot:
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        print("🚀 [Sistema] Hilo del Bot iniciado.")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    run_bot()
