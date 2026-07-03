@@ -9,7 +9,7 @@ import time
 # ============ CONFIGURACIÓN ============
 BOT_TOKEN = "8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ"
 ADMIN_ID = 6808824866
-API_URL = "http://localhost:8000"
+API_URL = "https://comando-evkk.onrender.com"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
