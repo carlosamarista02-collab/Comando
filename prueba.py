@@ -11,7 +11,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ============ CONFIGURACIÓN ============
 # IMPORTANTE: El token ahora se lee desde las variables de entorno de Render.
 # NO escribas el token directamente aquí.
-BOT_TOKEN = os.getenv('8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ', '')
+BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 ADMIN_ID = 6808824866
 API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')
 PORT = int(os.environ.get('PORT', 8080))
