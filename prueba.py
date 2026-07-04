@@ -9,11 +9,11 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============ CONFIGURACIÓN ============
-# IMPORTANTE: El token ahora se lee desde las variables de entorno de Render.
-# NO escribas el token directamente aquí.
+# El token se lee desde las variables de entorno de Render.
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 ADMIN_ID = 6808824866
-API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')
+API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')       # Backend FastAPI
+GAME_URL = os.getenv('GAME_URL', 'https://comando-evkk.onrender.com')     # URL del juego (HTML)
 PORT = int(os.environ.get('PORT', 8080))
 
 # Verificar token (Evita que el bot arranque si no hay token configurado)
@@ -178,8 +178,9 @@ Explora el universo, recolecta naves y alienígenas.
 
 @bot.message_handler(func=lambda message: message.text == "🎮 PLAY")
 def play_button(message):
+    # 🔥 Ahora usa GAME_URL (no API_URL)
     keyboard = InlineKeyboardMarkup()
-    play_btn = InlineKeyboardButton("🚀 ABRIR XENOPORT", url=API_URL)
+    play_btn = InlineKeyboardButton("🚀 ABRIR XENOPORT", url=GAME_URL)
     keyboard.add(play_btn)
     
     bot.send_message(
@@ -606,6 +607,7 @@ def run_bot():
     logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...") 
     logger.info(f"👤 Admin ID: {ADMIN_ID}")
     logger.info(f"🌐 API URL: {API_URL}")
+    logger.info(f"🎮 GAME URL: {GAME_URL}")
     logger.info("⏳ El bot está escuchando mensajes...")
     
     # Eliminar webhook existente para evitar conflictos
