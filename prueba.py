@@ -1,3 +1,11 @@
+Entendido. He eliminado completamente la clase LocalDB y todas las conexiones locales (respaldo en memoria). Ahora el 100% de las peticiones van directo al API_URL configurado, que debe ser el backend que se conecta a tu base de datos en Supabase.
+
+⚠️ CRÍTICO PARA QUE FUNCIONE: 
+En tu código actual, la variable API_URL apunta a https://comando-evkk.onrender.com. Esa es la URL del BOT, no del Backend. Si el bot se llama a sí mismo, te dará error 501. Debes ir al panel de Render, a Environment Variables, y cambiar API_URL para que apunte a la URL de tu Backend FastAPI (el que está conectado a Supabase).
+
+Aquí tienes el código completo modificado y listo para pegar:
+
+```python
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import requests
@@ -12,7 +20,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # El token se lee desde las variables de entorno de Render.
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 ADMIN_ID = 6808824866
-API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')       # Backend FastAPI
+# 🔥 IMPORTANTE: En Render, la variable API_URL debe apuntar a tu BACKEND (FastAPI), no al bot.
+API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')       
 GAME_URL = os.getenv('GAME_URL', 'https://aesthetic-chaja-a87a4e.netlify.app/')     # URL del juego (HTML)
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -44,48 +53,9 @@ def run_http_server():
     logger.info(f"🌐 Servidor HTTP escuchando en el puerto {PORT} (para mantener vivo el bot)")
     server.serve_forever()
 
-# ============ CLASE LOCALDB (respaldo) ============
-class LocalDB:
-    def __init__(self):
-        self.users = {}
-        self.wallet_requests = {}
-        self.p2p_listings = {}
-        self.request_counter = 0
-    
-    def get_user(self, telegram_id):
-        return self.users.get(str(telegram_id))
-    
-    def save_user(self, user_data):
-        self.users[str(user_data['telegram_id'])] = user_data
-        return user_data
-    
-    def create_wallet_request(self, request_data):
-        self.request_counter += 1
-        request_id = self.request_counter
-        request_data['id'] = request_id
-        request_data['status'] = 'pending'
-        request_data['created_at'] = datetime.utcnow().isoformat()
-        self.wallet_requests[str(request_id)] = request_data
-        return request_data
-    
-    def get_pending_requests(self):
-        return [r for r in self.wallet_requests.values() if r['status'] == 'pending']
-    
-    def get_request(self, request_id):
-        return self.wallet_requests.get(str(request_id))
-    
-    def update_request(self, request_id, status):
-        if str(request_id) in self.wallet_requests:
-            self.wallet_requests[str(request_id)]['status'] = status
-            self.wallet_requests[str(request_id)]['updated_at'] = datetime.utcnow().isoformat()
-            return self.wallet_requests[str(request_id)]
-        return None
-
-db = LocalDB()
-
-# ============ FUNCIONES DE API ============
+# ============ FUNCIONES DE API (Única conexión a la Base de Datos) ============
 def api_request(method, endpoint, data=None):
-    """Función para hacer peticiones a la API"""
+    """Función para hacer peticiones a la API (conecta con Supabase/Backend)"""
     url = f"{API_URL}{endpoint}"
     try:
         if method == 'GET':
@@ -105,32 +75,6 @@ def api_request(method, endpoint, data=None):
         logger.error(f"Error en api_request: {e}")
         return None
 
-def get_user_from_api(telegram_id):
-    """Obtener usuario de la API o crearlo si no existe"""
-    user = api_request('GET', f'/api/users/{telegram_id}')
-    if user:
-        db.save_user(user)
-        return user
-    
-    user_data = {
-        'telegram_id': telegram_id,
-        'telegram_username': None,
-        'telegram_name': None,
-        'balance_usdt': 0.0,
-        'balance_stars': 0.0,
-        'ships': [],
-        'aliens': [],
-        'planets': [],
-        'fuel_available': 0,
-        'has_done_expedition': False,
-        'active_contract': None
-    }
-    created = api_request('POST', '/api/users', user_data)
-    if created:
-        db.save_user(created)
-        return created
-    return user_data
-
 # ============ COMANDOS PRINCIPALES ============
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -140,14 +84,13 @@ def send_welcome(message):
     
     logger.info(f"📥 /start desde {user_id} (@{username})")
     
-    # Registrar usuario
+    # Registrar usuario DIRECTAMENTE en la API (sin LocalDB)
     user_data = {
         'telegram_id': user_id,
         'telegram_username': username,
         'telegram_name': name
     }
     api_request('POST', '/api/users', user_data)
-    db.save_user(user_data)
     
     # Crear teclado
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -178,7 +121,6 @@ Explora el universo, recolecta naves y alienígenas.
 
 @bot.message_handler(func=lambda message: message.text == "🎮 PLAY")
 def play_button(message):
-    # 🔥 Ahora usa GAME_URL (no API_URL)
     keyboard = InlineKeyboardMarkup()
     play_btn = InlineKeyboardButton("🚀 ABRIR XENOPORT", url=GAME_URL)
     keyboard.add(play_btn)
@@ -194,11 +136,9 @@ def play_button(message):
 def profile_button(message):
     user_id = message.from_user.id
     user = api_request('GET', f'/api/users/{user_id}')
-    if not user:
-        user = db.get_user(user_id)
     
     if not user:
-        bot.send_message(message.chat.id, "❌ No se pudo obtener tu perfil")
+        bot.send_message(message.chat.id, "❌ No se pudo obtener tu perfil. Asegúrate de haber usado /start primero.")
         return
     
     ships_count = len(user.get('ships', []))
@@ -228,11 +168,9 @@ Aliens: {aliens_count}
 def balance_button(message):
     user_id = message.from_user.id
     user = api_request('GET', f'/api/users/{user_id}')
-    if not user:
-        user = db.get_user(user_id)
     
     if not user:
-        bot.send_message(message.chat.id, "❌ No se pudo obtener tu saldo")
+        bot.send_message(message.chat.id, "❌ No se pudo obtener tu saldo.")
         return
     
     balance_text = f"""
@@ -304,8 +242,6 @@ def handle_admin_callbacks(call):
 # ---------- SOLICITUDES PENDIENTES ----------
 def show_pending_requests(message):
     requests_data = api_request('GET', '/api/wallet-requests/pending')
-    if not requests_data:
-        requests_data = db.get_pending_requests()
     
     if not requests_data:
         bot.send_message(message.chat.id, "✅ No hay solicitudes pendientes")
@@ -333,23 +269,10 @@ def show_pending_requests(message):
 # ---------- ESTADÍSTICAS ----------
 def show_stats(message):
     stats = api_request('GET', '/api/stats')
+    
     if not stats:
-        users = db.users
-        pending = len(db.get_pending_requests())
-        stats = {
-            'total_users': len(users),
-            'total_ships': 0,
-            'total_aliens': 0,
-            'total_usdt': 0,
-            'total_stars': 0,
-            'active_listings': 0,
-            'pending_requests': pending
-        }
-        for user in users.values():
-            stats['total_ships'] += len(user.get('ships', []))
-            stats['total_aliens'] += len(user.get('aliens', []))
-            stats['total_usdt'] += user.get('balance_usdt', 0)
-            stats['total_stars'] += user.get('balance_stars', 0)
+        bot.send_message(message.chat.id, "❌ No se pudieron cargar las estadísticas en este momento.")
+        return
     
     text = f"""
 📊 *Estadísticas de XENOPORT*
@@ -370,11 +293,9 @@ def show_stats(message):
 # ---------- USUARIOS ----------
 def show_users(message):
     users = api_request('GET', '/api/users')
-    if not users:
-        users = list(db.users.values())
     
     if not users:
-        bot.send_message(message.chat.id, "👥 No hay usuarios registrados")
+        bot.send_message(message.chat.id, "👥 No hay usuarios registrados o hubo un error al obtenerlos.")
         return
     
     text = "👥 *Usuarios Registrados*\n\n"
@@ -498,14 +419,11 @@ def handle_request_action(call):
     action = parts[0]
     request_id = int(parts[1])
     
+    # Llamada directa a la API
     result = api_request('PUT', f'/api/wallet-requests/{request_id}', {"status": action})
-    if not result:
-        result = db.update_request(request_id, action)
     
     if result:
         req = api_request('GET', f'/api/wallet-requests/{request_id}')
-        if not req:
-            req = db.get_request(request_id)
         
         if req:
             user_id = req.get('telegram_id')
@@ -541,7 +459,7 @@ def handle_request_action(call):
                     call.message.message_id
                 )
     else:
-        bot.answer_callback_query(call.id, "❌ Error al procesar la solicitud")
+        bot.answer_callback_query(call.id, "❌ Error al procesar la solicitud en el servidor")
 
 # ---------- RESET CONFIRMACIÓN ----------
 @bot.callback_query_handler(func=lambda call: call.data in ["reset_confirm", "reset_cancel"])
@@ -633,3 +551,16 @@ if __name__ == "__main__":
     
     # Iniciar el bot (polling) en el hilo principal
     run_bot()
+```
+
+✅ Instrucciones de configuración en Render:
+
+1. Copia el código completo y sobrescribe tu archivo main.py en Render.
+2. Ve a la pestaña Environment Variables de tu servicio en Render.
+3. Asegúrate de tener estas 3 variables configuradas (sin comillas en el valor):
+   · BOT_TOKEN: tu_token_de_Telegram
+   · API_URL: https://url-de-tu-backend-fastapi-en-render.com (Este es el paso clave)
+   · GAME_URL: https://aesthetic-chaja-a87a4e.netlify.app/
+4. Dale a Deploy.
+
+A partir de ahora, toda la información de los usuarios, saldos y listados se leerá y escribirá directamente en tu API / Supabase.
