@@ -2,21 +2,45 @@ import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import requests
 import logging
-from datetime import datetime
-import time
 import os
+import time
+import threading
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============ CONFIGURACIÓN ============
 BOT_TOKEN = "8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ"
 ADMIN_ID = 6808824866
 API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')
+PORT = int(os.environ.get('PORT', 8080))
+
+# Verificar token
+if not BOT_TOKEN or len(BOT_TOKEN) < 20:
+    print("❌ ERROR: Token inválido o vacío. Revisa tu token en @BotFather.")
+    exit(1)
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Inicializar bot
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+
+# ============ SERVIDOR HTTP PARA KEEP-ALIVE (Render) ============
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running')
+    
+    def log_message(self, format, *args):
+        return  # Silenciar logs del servidor HTTP
+
+def run_http_server():
+    server = HTTPServer(('0.0.0.0', PORT), KeepAliveHandler)
+    logger.info(f"🌐 Servidor HTTP escuchando en el puerto {PORT} (para mantener vivo el bot)")
+    server.serve_forever()
 
 # ============ CLASE LOCALDB (respaldo) ============
 class LocalDB:
@@ -114,7 +138,7 @@ def send_welcome(message):
     
     logger.info(f"📥 /start desde {user_id} (@{username})")
     
-    # Registrar usuario (saldo inicia en 0)
+    # Registrar usuario
     user_data = {
         'telegram_id': user_id,
         'telegram_username': username,
@@ -386,7 +410,7 @@ def show_p2p_listings(message):
     
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ---------- VER TABLAS (NUEVO) ----------
+# ---------- VER TABLAS ----------
 def show_tables(message):
     try:
         r = requests.get(f"{API_URL}/api/admin/tables", timeout=10)
@@ -394,7 +418,6 @@ def show_tables(message):
             data = r.json()
             msg = "📊 *TABLAS DE LA BASE DE DATOS*\n\n"
 
-            # Usuarios
             msg += "👥 *USUARIOS*\n"
             if data.get('usuarios'):
                 for u in data['usuarios'][:10]:
@@ -408,7 +431,6 @@ def show_tables(message):
             else:
                 msg += "   (vacía)\n"
 
-            # Solicitudes
             msg += "\n📋 *SOLICITUDES DE BILLETERA*\n"
             if data.get('solicitudes'):
                 for s in data['solicitudes'][:10]:
@@ -422,7 +444,6 @@ def show_tables(message):
             else:
                 msg += "   (vacía)\n"
 
-            # Listados P2P
             msg += "\n📦 *LISTADOS P2P*\n"
             if data.get('listados_p2p'):
                 for l in data['listados_p2p'][:10]:
@@ -437,7 +458,6 @@ def show_tables(message):
             else:
                 msg += "   (vacía)\n"
 
-            # Enviar mensaje
             if len(msg) > 4096:
                 for x in range(0, len(msg), 4096):
                     bot.send_message(message.chat.id, msg[x:x+4096], parse_mode='Markdown')
@@ -448,7 +468,7 @@ def show_tables(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Error: {str(e)}")
 
-# ---------- RESETEAR BASE DE DATOS ----------
+# ---------- RESET ----------
 def ask_reset_confirmation(message):
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
@@ -464,7 +484,7 @@ def ask_reset_confirmation(message):
         reply_markup=keyboard
     )
 
-# ---------- APROBAR/RECHAZAR SOLICITUDES ----------
+# ---------- APROBAR/RECHAZAR ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('reject_'))
 def handle_request_action(call):
     if call.from_user.id != ADMIN_ID:
@@ -578,21 +598,34 @@ O usa los botones del menú.
 """
     bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
 
-# ============ FUNCIÓN PARA INICIAR EL BOT ============
+# ============ FUNCIÓN PARA INICIAR EL BOT (POLLING) ============
 def run_bot():
-    """Función principal para iniciar el bot"""
-    logger.info("🚀 Bot de XENOPORT iniciado...")
+    logger.info("🚀 Bot de XENOPORT iniciado (modo polling)...")
     logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...")
     logger.info(f"👤 Admin ID: {ADMIN_ID}")
     logger.info(f"🌐 API URL: {API_URL}")
-    logger.info("✅ Bot listo para usar!")
+    logger.info("⏳ El bot está escuchando mensajes...")
     
+    # Eliminar webhook existente para evitar conflictos
     try:
-        bot.polling(non_stop=True, interval=1, timeout=30)
+        bot.remove_webhook()
+        logger.info("✅ Webhook eliminado (modo polling activo)")
     except Exception as e:
-        logger.error(f"❌ Error en el bot: {e}")
-        time.sleep(5)
-        run_bot()
+        logger.warning(f"No se pudo eliminar webhook: {e}")
+    
+    while True:
+        try:
+            bot.polling(non_stop=True, interval=1, timeout=30, long_polling_timeout=20)
+        except Exception as e:
+            logger.error(f"❌ Error en polling: {e}")
+            time.sleep(5)
 
+# ============ ARRANQUE PRINCIPAL ============
 if __name__ == "__main__":
+    # Iniciar servidor HTTP para mantener el bot vivo en Render
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
+    logger.info(f"🌐 Servidor HTTP iniciado en el puerto {PORT}")
+    
+    # Iniciar el bot (polling) en el hilo principal
     run_bot()
