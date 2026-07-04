@@ -9,14 +9,16 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============ CONFIGURACIÓN ============
-BOT_TOKEN = "8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ"
+# IMPORTANTE: El token ahora se lee desde las variables de entorno de Render.
+# NO escribas el token directamente aquí.
+BOT_TOKEN = os.getenv('8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ', '')
 ADMIN_ID = 6808824866
 API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')
 PORT = int(os.environ.get('PORT', 8080))
 
-# Verificar token
+# Verificar token (Evita que el bot arranque si no hay token configurado)
 if not BOT_TOKEN or len(BOT_TOKEN) < 20:
-    print("❌ ERROR: Token inválido o vacío. Revisa tu token en @BotFather.")
+    print("❌ ERROR CRÍTICO: Token inválido o vacío. Asegúrate de configurar BOT_TOKEN en las variables de entorno de Render.")
     exit(1)
 
 # Configurar logging
@@ -601,7 +603,7 @@ O usa los botones del menú.
 # ============ FUNCIÓN PARA INICIAR EL BOT (POLLING) ============
 def run_bot():
     logger.info("🚀 Bot de XENOPORT iniciado (modo polling)...")
-    logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...")
+    logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...") 
     logger.info(f"👤 Admin ID: {ADMIN_ID}")
     logger.info(f"🌐 API URL: {API_URL}")
     logger.info("⏳ El bot está escuchando mensajes...")
