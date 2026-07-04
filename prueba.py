@@ -7,7 +7,7 @@ import time
 import os
 
 # ============ CONFIGURACIÓN ============
-BOT_TOKEN = "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY"
+BOT_TOKEN = "8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ"
 ADMIN_ID = 6808824866
 API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')
 
