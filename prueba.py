@@ -543,16 +543,3 @@ if __name__ == "__main__":
     
     # Iniciar el bot (polling) en el hilo principal
     run_bot()
-```
-
-✅ Instrucciones de configuración en Render:
-
-1. Copia el código completo y sobrescribe tu archivo main.py en Render.
-2. Ve a la pestaña Environment Variables de tu servicio en Render.
-3. Asegúrate de tener estas 3 variables configuradas (sin comillas en el valor):
-   · BOT_TOKEN: tu_token_de_Telegram
-   · API_URL: https://url-de-tu-backend-fastapi-en-render.com (Este es el paso clave)
-   · GAME_URL: https://aesthetic-chaja-a87a4e.netlify.app/
-4. Dale a Deploy.
-
-A partir de ahora, toda la información de los usuarios, saldos y listados se leerá y escribirá directamente en tu API / Supabase.
