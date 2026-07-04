@@ -1,11 +1,3 @@
-Entendido. He eliminado completamente la clase LocalDB y todas las conexiones locales (respaldo en memoria). Ahora el 100% de las peticiones van directo al API_URL configurado, que debe ser el backend que se conecta a tu base de datos en Supabase.
-
-⚠️ CRÍTICO PARA QUE FUNCIONE: 
-En tu código actual, la variable API_URL apunta a https://comando-evkk.onrender.com. Esa es la URL del BOT, no del Backend. Si el bot se llama a sí mismo, te dará error 501. Debes ir al panel de Render, a Environment Variables, y cambiar API_URL para que apunte a la URL de tu Backend FastAPI (el que está conectado a Supabase).
-
-Aquí tienes el código completo modificado y listo para pegar:
-
-```python
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 import requests
