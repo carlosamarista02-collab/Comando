@@ -13,7 +13,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 ADMIN_ID = 6808824866
 API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')       # Backend FastAPI
-GAME_URL = os.getenv('GAME_URL', 'https://comando-evkk.onrender.com')     # URL del juego (HTML)
+GAME_URL = os.getenv('GAME_URL', 'https://aesthetic-chaja-a87a4e.netlify.app/')     # URL del juego (HTML)
 PORT = int(os.environ.get('PORT', 8080))
 
 # Verificar token (Evita que el bot arranque si no hay token configurado)
