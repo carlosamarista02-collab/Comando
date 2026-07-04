@@ -1,562 +1,242 @@
-import logging
-import threading
-import time
-import os
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, JSON, BigInteger, Text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-from datetime import datetime
-import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-import uvicorn
+import requests
+import logging
+from datetime import datetime
+import time
+import os
 
 # ============ CONFIGURACIÓN ============
-BOT_TOKEN = "8206009148:AAGPVgO2VLfKYcUNy-BlBGWfv40gwrFivHQ"
+BOT_TOKEN = "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY"
 ADMIN_ID = 6808824866
-DATABASE_URL = "postgresql://postgres.rsqcsdheaibeuhjbxicn:c4OVrj3MTehgvu57@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
+API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============ BASE DE DATOS ============
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# ---------- TABLA USUARIOS ----------
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(BigInteger, unique=True, index=True)
-    telegram_username = Column(String, nullable=True)
-    telegram_name = Column(String, nullable=True)
-    balance_usdt = Column(Float, default=0.0)
-    balance_stars = Column(Float, default=0.0)
-    ships = Column(JSON, default=list)          # Lista de naves
-    aliens = Column(JSON, default=list)        # Lista de aliens
-    planets = Column(JSON, default=list)       # Lista de planetas (progreso)
-    active_contract = Column(JSON, nullable=True)
-    fuel_available = Column(Float, default=0.0)
-    has_done_expedition = Column(Boolean, default=False)
-    last_expedition_time = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-# ---------- TABLA SOLICITUDES DE BILLETERA ----------
-class WalletRequest(Base):
-    __tablename__ = "wallet_requests"
-    id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(BigInteger, index=True)
-    type = Column(String)                       # 'recarga' o 'retiro'
-    amount = Column(Float)
-    network = Column(String)
-    currency = Column(String)
-    txid = Column(String, nullable=True)
-    status = Column(String, default='pending')  # 'pending', 'approved', 'rejected'
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-# ---------- TABLA LISTADOS P2P ----------
-class P2PListing(Base):
-    __tablename__ = "p2p_listings"
-    id = Column(Integer, primary_key=True, index=True)
-    listing_id = Column(String, unique=True, index=True)
-    type = Column(String)                       # 'ship' o 'alien'
-    item_id = Column(String)
-    name = Column(String)
-    rarity = Column(String)
-    image = Column(String)
-    seller_id = Column(BigInteger, index=True)
-    seller_name = Column(String)
-    price = Column(Float)
-    quantity = Column(Integer, default=1)
-    data = Column(JSON, default=dict)           # Datos extra (aliens, maxAliens, fuel, etc.)
-    status = Column(String, default='active')   # 'active', 'sold', 'cancelled'
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-# Crear tablas si no existen
-Base.metadata.create_all(bind=engine)
-
-# ============ DEPENDENCIA DB ============
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# ============ SCHEMAS (Pydantic) ============
-class UserCreate(BaseModel):
-    telegram_id: int
-    telegram_username: Optional[str] = None
-    telegram_name: Optional[str] = None
-
-class UserUpdate(BaseModel):
-    balance_usdt: Optional[float] = None
-    balance_stars: Optional[float] = None
-    ships: Optional[List[Dict]] = None
-    aliens: Optional[List[Dict]] = None
-    planets: Optional[List[Dict]] = None
-    active_contract: Optional[Dict] = None
-    fuel_available: Optional[float] = None
-    has_done_expedition: Optional[bool] = None
-    last_expedition_time: Optional[datetime] = None
-
-class UserResponse(BaseModel):
-    id: int
-    telegram_id: int
-    telegram_username: Optional[str] = None
-    telegram_name: Optional[str] = None
-    balance_usdt: float
-    balance_stars: float
-    ships: List[Dict]
-    aliens: List[Dict]
-    planets: List[Dict]
-    active_contract: Optional[Dict] = None
-    fuel_available: float
-    has_done_expedition: bool
-    last_expedition_time: Optional[datetime] = None
-    created_at: datetime
-    updated_at: datetime
-    class Config:
-        from_attributes = True
-
-class WalletRequestCreate(BaseModel):
-    telegram_id: int
-    telegram_username: Optional[str] = None
-    telegram_name: Optional[str] = None
-    type: str
-    amount: float
-    network: str
-    currency: str
-    txid: Optional[str] = None
-
-class WalletRequestUpdate(BaseModel):
-    status: str
-
-class WalletRequestResponse(BaseModel):
-    id: int
-    telegram_id: int
-    telegram_username: Optional[str] = None
-    telegram_name: Optional[str] = None
-    type: str
-    amount: float
-    network: str
-    currency: str
-    txid: Optional[str] = None
-    status: str
-    created_at: datetime
-    updated_at: datetime
-    class Config:
-        from_attributes = True
-
-class P2PListingCreate(BaseModel):
-    listing_id: str
-    type: str
-    item_id: str
-    name: str
-    rarity: str
-    image: str
-    seller_id: int
-    seller_name: str
-    price: float
-    quantity: int = 1
-    data: Dict = {}
-
-class P2PListingUpdate(BaseModel):
-    status: str
-
-class P2PListingResponse(BaseModel):
-    id: int
-    listing_id: str
-    type: str
-    item_id: str
-    name: str
-    rarity: str
-    image: str
-    seller_id: int
-    seller_name: str
-    price: float
-    quantity: int
-    data: Dict
-    status: str
-    created_at: datetime
-    class Config:
-        from_attributes = True
-
-class SyncData(BaseModel):
-    telegram_id: int
-    ships: List[Dict]
-    aliens: List[Dict]
-    planets: List[Dict]
-    p2pListings: List[Dict]
-    balance_usdt: float
-    balance_stars: float
-    fuel_available: float = 0
-    has_done_expedition: bool = False
-    last_expedition_time: Optional[datetime] = None
-    active_contract: Optional[Dict] = None
-
-# ============ FASTAPI APP ============
-app = FastAPI(title="XENOPORT API", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ============ ENDPOINTS API ============
-
-# --- Usuarios ---
-@app.post("/api/users", response_model=UserResponse)
-def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.telegram_id == user.telegram_id).first()
-    if existing:
-        return existing
-    db_user = User(**user.dict())
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-@app.get("/api/users/{telegram_id}", response_model=UserResponse)
-def get_user(telegram_id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        raise HTTPException(404, "Usuario no encontrado")
-    return user
-
-@app.get("/api/users", response_model=List[UserResponse])
-def get_users(db: Session = Depends(get_db)):
-    return db.query(User).all()
-
-@app.put("/api/users/{telegram_id}", response_model=UserResponse)
-def update_user(telegram_id: int, user_update: UserUpdate, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == telegram_id).first()
-    if not user:
-        raise HTTPException(404, "Usuario no encontrado")
-    for key, value in user_update.dict(exclude_unset=True).items():
-        setattr(user, key, value)
-    user.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(user)
-    return user
-
-# --- Sincronización ---
-@app.post("/api/sync")
-def sync_data(data: SyncData, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.telegram_id == data.telegram_id).first()
-    if not user:
-        user = User(telegram_id=data.telegram_id)
-        db.add(user)
-    user.ships = data.ships
-    user.aliens = data.aliens
-    user.planets = data.planets
-    user.balance_usdt = data.balance_usdt
-    user.balance_stars = data.balance_stars
-    user.fuel_available = data.fuel_available
-    user.has_done_expedition = data.has_done_expedition
-    user.last_expedition_time = data.last_expedition_time
-    user.active_contract = data.active_contract
-    user.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(user)
-    # Sincronizar P2P listings
-    for listing in data.p2pListings:
-        existing = db.query(P2PListing).filter(P2PListing.listing_id == listing['id']).first()
-        if existing:
-            existing.status = listing.get('status', 'active')
-            existing.updated_at = datetime.utcnow()
-        else:
-            db.add(P2PListing(
-                listing_id=listing['id'],
-                type=listing['type'],
-                item_id=listing['itemId'],
-                name=listing['name'],
-                rarity=listing['rarity'],
-                image=listing['image'],
-                seller_id=listing['sellerId'],
-                seller_name=listing['seller'],
-                price=listing['price'],
-                quantity=listing.get('quantity', 1),
-                data=listing
-            ))
-    db.commit()
-    return {"status": "synced"}
-
-# --- Wallet Requests ---
-@app.post("/api/wallet-requests", response_model=WalletRequestResponse)
-def create_wallet_request(request: WalletRequestCreate, db: Session = Depends(get_db)):
-    db_request = WalletRequest(**request.dict(), status='pending')
-    db.add(db_request)
-    db.commit()
-    db.refresh(db_request)
-    # Notificar al admin
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        text = f"📋 Nueva solicitud #{db_request.id}\n👤 Usuario: {request.telegram_id}\n📊 Tipo: {request.type}\n💰 Monto: {request.amount} {request.currency}"
-        requests.post(url, json={"chat_id": ADMIN_ID, "text": text, "parse_mode": "Markdown"})
-    except:
-        pass
-    return db_request
-
-@app.get("/api/wallet-requests", response_model=List[WalletRequestResponse])
-def get_wallet_requests(db: Session = Depends(get_db)):
-    return db.query(WalletRequest).order_by(WalletRequest.created_at.desc()).all()
-
-@app.get("/api/wallet-requests/pending", response_model=List[WalletRequestResponse])
-def get_pending_requests(db: Session = Depends(get_db)):
-    return db.query(WalletRequest).filter(WalletRequest.status == 'pending').order_by(WalletRequest.created_at.desc()).all()
-
-@app.get("/api/wallet-requests/{request_id}", response_model=WalletRequestResponse)
-def get_wallet_request(request_id: int, db: Session = Depends(get_db)):
-    req = db.query(WalletRequest).filter(WalletRequest.id == request_id).first()
-    if not req:
-        raise HTTPException(404, "Solicitud no encontrada")
-    return req
-
-@app.put("/api/wallet-requests/{request_id}", response_model=WalletRequestResponse)
-def update_wallet_request(request_id: int, update: WalletRequestUpdate, db: Session = Depends(get_db)):
-    req = db.query(WalletRequest).filter(WalletRequest.id == request_id).first()
-    if not req:
-        raise HTTPException(404, "Solicitud no encontrada")
-    req.status = update.status
-    req.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(req)
-    if update.status == 'approved':
-        user = db.query(User).filter(User.telegram_id == req.telegram_id).first()
-        if user:
-            if req.currency == 'USDT':
-                user.balance_usdt += req.amount
-            elif req.currency == 'Stars':
-                user.balance_stars += req.amount
-            db.commit()
-    return req
-
-# --- P2P Listings ---
-@app.get("/api/p2p/listings/active", response_model=List[P2PListingResponse])
-def get_active_p2p_listings(db: Session = Depends(get_db)):
-    return db.query(P2PListing).filter(P2PListing.status == 'active').order_by(P2PListing.created_at.desc()).all()
-
-@app.post("/api/p2p/listings", response_model=P2PListingResponse)
-def create_p2p_listing(listing: P2PListingCreate, db: Session = Depends(get_db)):
-    db_listing = P2PListing(**listing.dict(), status='active')
-    db.add(db_listing)
-    db.commit()
-    db.refresh(db_listing)
-    return db_listing
-
-@app.put("/api/p2p/listings/{listing_id}")
-def update_p2p_listing(listing_id: str, update: P2PListingUpdate, db: Session = Depends(get_db)):
-    listing = db.query(P2PListing).filter(P2PListing.listing_id == listing_id).first()
-    if not listing:
-        raise HTTPException(404, "Listing no encontrado")
-    listing.status = update.status
-    listing.updated_at = datetime.utcnow()
-    db.commit()
-    return {"status": "updated"}
-
-# --- Estadísticas ---
-@app.get("/api/stats")
-def get_stats(db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    pending = db.query(WalletRequest).filter(WalletRequest.status == 'pending').count()
-    active = db.query(P2PListing).filter(P2PListing.status == 'active').count()
-    total_ships = sum(len(u.ships or []) for u in users)
-    total_aliens = sum(len(u.aliens or []) for u in users)
-    total_usdt = sum(u.balance_usdt or 0 for u in users)
-    total_stars = sum(u.balance_stars or 0 for u in users)
-    return {
-        "total_users": len(users),
-        "total_ships": total_ships,
-        "total_aliens": total_aliens,
-        "total_usdt": total_usdt,
-        "total_stars": total_stars,
-        "active_listings": active,
-        "pending_requests": pending
-    }
-
-# --- NUEVO: Ver todas las tablas (dump) ---
-@app.get("/api/admin/tables")
-def get_all_tables(db: Session = Depends(get_db)):
-    users = db.query(User).all()
-    requests = db.query(WalletRequest).all()
-    listings = db.query(P2PListing).all()
-
-    # Formatear para mostrar
-    users_data = []
-    for u in users:
-        users_data.append({
-            "id": u.id,
-            "telegram_id": u.telegram_id,
-            "nombre": u.telegram_name or "Sin nombre",
-            "username": u.telegram_username or "Sin usuario",
-            "usdt": u.balance_usdt,
-            "stars": u.balance_stars,
-            "naves": len(u.ships or []),
-            "aliens": len(u.aliens or []),
-            "combustible": u.fuel_available,
-            "contrato": u.active_contract,
-            "fecha_registro": u.created_at.isoformat() if u.created_at else None
-        })
-
-    requests_data = [
-        {
-            "id": r.id,
-            "usuario": r.telegram_id,
-            "tipo": r.type,
-            "monto": r.amount,
-            "moneda": r.currency,
-            "red": r.network,
-            "txid": r.txid,
-            "estado": r.status,
-            "fecha": r.created_at.isoformat() if r.created_at else None
-        } for r in requests
-    ]
-
-    listings_data = [
-        {
-            "id": l.listing_id,
-            "tipo": l.type,
-            "nombre": l.name,
-            "rareza": l.rarity,
-            "precio": l.price,
-            "vendedor": l.seller_name,
-            "vendedor_id": l.seller_id,
-            "estado": l.status,
-            "fecha": l.created_at.isoformat() if l.created_at else None
-        } for l in listings
-    ]
-
-    return {
-        "usuarios": users_data,
-        "solicitudes": requests_data,
-        "listados_p2p": listings_data
-    }
-
-# --- NUEVO: Resetear base de datos (borrar y recrear tablas) ---
-@app.post("/api/admin/reset")
-def reset_database(db: Session = Depends(get_db)):
-    try:
-        # Borrar todos los datos de las tablas
-        db.query(User).delete()
-        db.query(WalletRequest).delete()
-        db.query(P2PListing).delete()
-        db.commit()
-        # Opcional: recrear tablas (si se quiere eliminar la estructura y volver a crearla)
-        # Base.metadata.drop_all(bind=engine)
-        # Base.metadata.create_all(bind=engine)
-        return {"status": "reset_completed", "message": "Todos los datos han sido eliminados. Las tablas están vacías."}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(500, f"Error al resetear: {str(e)}")
-
-# --- Health check ---
-@app.get("/health")
-def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-# ============ BOT DE TELEGRAM ============
+# Inicializar bot
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Variables globales para la URL base
-BASE_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://comando-evkk.onrender.com')
+# ============ CLASE LOCALDB (respaldo) ============
+class LocalDB:
+    def __init__(self):
+        self.users = {}
+        self.wallet_requests = {}
+        self.p2p_listings = {}
+        self.request_counter = 0
+    
+    def get_user(self, telegram_id):
+        return self.users.get(str(telegram_id))
+    
+    def save_user(self, user_data):
+        self.users[str(user_data['telegram_id'])] = user_data
+        return user_data
+    
+    def create_wallet_request(self, request_data):
+        self.request_counter += 1
+        request_id = self.request_counter
+        request_data['id'] = request_id
+        request_data['status'] = 'pending'
+        request_data['created_at'] = datetime.utcnow().isoformat()
+        self.wallet_requests[str(request_id)] = request_data
+        return request_data
+    
+    def get_pending_requests(self):
+        return [r for r in self.wallet_requests.values() if r['status'] == 'pending']
+    
+    def get_request(self, request_id):
+        return self.wallet_requests.get(str(request_id))
+    
+    def update_request(self, request_id, status):
+        if str(request_id) in self.wallet_requests:
+            self.wallet_requests[str(request_id)]['status'] = status
+            self.wallet_requests[str(request_id)]['updated_at'] = datetime.utcnow().isoformat()
+            return self.wallet_requests[str(request_id)]
+        return None
 
-# ---------- COMANDOS ----------
+db = LocalDB()
+
+# ============ FUNCIONES DE API ============
+def api_request(method, endpoint, data=None):
+    """Función para hacer peticiones a la API"""
+    url = f"{API_URL}{endpoint}"
+    try:
+        if method == 'GET':
+            response = requests.get(url, timeout=10)
+        elif method == 'POST':
+            response = requests.post(url, json=data, timeout=10)
+        elif method == 'PUT':
+            response = requests.put(url, json=data, timeout=10)
+        else:
+            return None
+        
+        if response.status_code == 200:
+            return response.json()
+        logger.warning(f"API error {response.status_code}: {response.text}")
+        return None
+    except Exception as e:
+        logger.error(f"Error en api_request: {e}")
+        return None
+
+def get_user_from_api(telegram_id):
+    """Obtener usuario de la API o crearlo si no existe"""
+    user = api_request('GET', f'/api/users/{telegram_id}')
+    if user:
+        db.save_user(user)
+        return user
+    
+    user_data = {
+        'telegram_id': telegram_id,
+        'telegram_username': None,
+        'telegram_name': None,
+        'balance_usdt': 0.0,
+        'balance_stars': 0.0,
+        'ships': [],
+        'aliens': [],
+        'planets': [],
+        'fuel_available': 0,
+        'has_done_expedition': False,
+        'active_contract': None
+    }
+    created = api_request('POST', '/api/users', user_data)
+    if created:
+        db.save_user(created)
+        return created
+    return user_data
+
+# ============ COMANDOS PRINCIPALES ============
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     username = message.from_user.username or "Usuario"
     name = message.from_user.first_name or ""
-    # Registrar usuario
-    try:
-        requests.post(f"{BASE_URL}/api/users", json={
-            "telegram_id": user_id,
-            "telegram_username": username,
-            "telegram_name": name
-        })
-    except:
-        pass
+    
+    logger.info(f"📥 /start desde {user_id} (@{username})")
+    
+    # Registrar usuario (saldo inicia en 0)
+    user_data = {
+        'telegram_id': user_id,
+        'telegram_username': username,
+        'telegram_name': name
+    }
+    api_request('POST', '/api/users', user_data)
+    db.save_user(user_data)
+    
+    # Crear teclado
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    keyboard.add(
-        KeyboardButton("🎮 PLAY"),
-        KeyboardButton("📋 Perfil"),
-        KeyboardButton("💰 Saldo")
-    )
+    play_btn = KeyboardButton("🎮 PLAY")
+    profile_btn = KeyboardButton("📋 Perfil")
+    balance_btn = KeyboardButton("💰 Saldo")
+    keyboard.add(play_btn, profile_btn, balance_btn)
+    
     if user_id == ADMIN_ID:
-        keyboard.add(KeyboardButton("🔐 Panel Admin"))
+        admin_btn = KeyboardButton("🔐 Panel Admin")
+        keyboard.add(admin_btn)
+    
+    welcome_text = f"""
+🚀 *¡Bienvenido a XENOPORT, Capitán {name}!*
+
+Tu aventura espacial comienza aquí. 
+Explora el universo, recolecta naves y alienígenas.
+
+🌌 *¡Que la fuerza te acompañe!*
+"""
+    
+    bot.send_message(
+        message.chat.id, 
+        welcome_text, 
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+@bot.message_handler(func=lambda message: message.text == "🎮 PLAY")
+def play_button(message):
+    keyboard = InlineKeyboardMarkup()
+    play_btn = InlineKeyboardButton("🚀 ABRIR XENOPORT", url=API_URL)
+    keyboard.add(play_btn)
+    
     bot.send_message(
         message.chat.id,
-        f"🚀 ¡Bienvenido a XENOPORT, Capitán {name}!",
-        reply_markup=keyboard,
-        parse_mode='Markdown'
+        "🛸 *Prepárate para la aventura espacial!*\n\nHaz clic en el botón para comenzar:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
     )
 
-@bot.message_handler(func=lambda m: m.text == "🎮 PLAY")
-def play(m):
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("🚀 ABRIR XENOPORT", url=BASE_URL))
-    bot.send_message(m.chat.id, "🛸 Haz clic para comenzar:", reply_markup=keyboard)
-
-@bot.message_handler(func=lambda m: m.text == "📋 Perfil")
-def perfil(m):
-    user_id = m.from_user.id
-    try:
-        r = requests.get(f"{BASE_URL}/api/users/{user_id}")
-        if r.status_code == 200:
-            u = r.json()
-            txt = (
-                f"📋 *Perfil*\n"
-                f"🆔 ID: {u['telegram_id']}\n"
-                f"👤 Nombre: {u.get('telegram_name', 'Sin nombre')}\n"
-                f"🐦 Usuario: @{u.get('telegram_username', 'sin usuario')}\n"
-                f"💠 USDT: {u['balance_usdt']:.2f}\n"
-                f"⭐ Stars: {u['balance_stars']:.0f}\n"
-                f"⛽ Combustible: {u['fuel_available']:.0f}\n"
-                f"🚀 Naves: {len(u.get('ships', []))}\n"
-                f"👾 Aliens: {len(u.get('aliens', []))}\n"
-                f"📅 Registro: {u.get('created_at', '')[:10] if u.get('created_at') else 'N/A'}"
-            )
-            bot.send_message(m.chat.id, txt, parse_mode='Markdown')
-        else:
-            bot.send_message(m.chat.id, "❌ No se pudo obtener el perfil")
-    except:
-        bot.send_message(m.chat.id, "❌ Error de conexión")
-
-@bot.message_handler(func=lambda m: m.text == "💰 Saldo")
-def saldo(m):
-    user_id = m.from_user.id
-    try:
-        r = requests.get(f"{BASE_URL}/api/users/{user_id}")
-        if r.status_code == 200:
-            u = r.json()
-            txt = f"💰 *Saldo*\n💠 USDT: {u['balance_usdt']:.2f}\n⭐ Stars: {u['balance_stars']:.0f}\n⛽ Combustible: {u['fuel_available']:.0f}"
-            bot.send_message(m.chat.id, txt, parse_mode='Markdown')
-        else:
-            bot.send_message(m.chat.id, "❌ No se pudo obtener el saldo")
-    except:
-        bot.send_message(m.chat.id, "❌ Error de conexión")
-
-# ---------- PANEL DE ADMINISTRACIÓN ----------
-@bot.message_handler(func=lambda m: m.text == "🔐 Panel Admin")
-def admin_panel(m):
-    if m.from_user.id != ADMIN_ID:
-        bot.send_message(m.chat.id, "❌ No tienes permisos")
+@bot.message_handler(func=lambda message: message.text == "📋 Perfil")
+def profile_button(message):
+    user_id = message.from_user.id
+    user = api_request('GET', f'/api/users/{user_id}')
+    if not user:
+        user = db.get_user(user_id)
+    
+    if not user:
+        bot.send_message(message.chat.id, "❌ No se pudo obtener tu perfil")
         return
+    
+    ships_count = len(user.get('ships', []))
+    aliens_count = len(user.get('aliens', []))
+    
+    profile_text = f"""
+📋 *Tu Perfil*
+
+🆔 ID: {user.get('telegram_id')}
+👤 Nombre: {user.get('telegram_name', 'Sin nombre')}
+🐦 Usuario: @{user.get('telegram_username', 'sin usuario')}
+
+💰 *Saldo:*
+💠 USDT: {user.get('balance_usdt', 0):.2f}
+⭐ Stars: {user.get('balance_stars', 0):.0f}
+⛽ Combustible: {user.get('fuel_available', 0):.0f}
+
+🚀 *Inventario:*
+Naves: {ships_count}
+Aliens: {aliens_count}
+
+📅 Miembro desde: {user.get('created_at', '')[:10] if user.get('created_at') else 'N/A'}
+"""
+    bot.send_message(message.chat.id, profile_text, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda message: message.text == "💰 Saldo")
+def balance_button(message):
+    user_id = message.from_user.id
+    user = api_request('GET', f'/api/users/{user_id}')
+    if not user:
+        user = db.get_user(user_id)
+    
+    if not user:
+        bot.send_message(message.chat.id, "❌ No se pudo obtener tu saldo")
+        return
+    
+    balance_text = f"""
+💰 *Tu Saldo*
+
+💠 *USDT:* {user.get('balance_usdt', 0):.2f}
+⭐ *Stars:* {user.get('balance_stars', 0):.0f}
+⛽ *Combustible:* {user.get('fuel_available', 0):.0f}
+
+📊 *Total de activos:*
+🚀 Naves: {len(user.get('ships', []))}
+👾 Aliens: {len(user.get('aliens', []))}
+"""
+    bot.send_message(message.chat.id, balance_text, parse_mode='Markdown')
+
+# ============ PANEL DE ADMINISTRACIÓN ============
+@bot.message_handler(func=lambda message: message.text == "🔐 Panel Admin")
+def admin_panel_button(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "❌ No tienes permisos de administrador")
+        return
+    
+    show_admin_panel(message.chat.id)
+
+def show_admin_panel(chat_id):
     keyboard = InlineKeyboardMarkup(row_width=2)
     keyboard.add(
         InlineKeyboardButton("📋 Solicitudes Pendientes", callback_data="admin_pending"),
-        InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats"),
+        InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats")
+    )
+    keyboard.add(
         InlineKeyboardButton("👥 Usuarios", callback_data="admin_users"),
         InlineKeyboardButton("📦 Listados P2P", callback_data="admin_p2p")
     )
@@ -564,230 +244,283 @@ def admin_panel(m):
         InlineKeyboardButton("📊 Ver Tablas", callback_data="admin_tables"),
         InlineKeyboardButton("🗑️ Resetear Base de Datos", callback_data="admin_reset")
     )
-    bot.send_message(m.chat.id, "🔐 *Panel de Administración*", parse_mode='Markdown', reply_markup=keyboard)
+    
+    bot.send_message(
+        chat_id,
+        "🔐 *Panel de Administración de XENOPORT*\n\nSelecciona una opción:",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
 
-# ---------- CALLBACKS DEL ADMIN ----------
+# ============ CALLBACKS DEL ADMIN ============
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
-def admin_callback(call):
+def handle_admin_callbacks(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "No autorizado")
+        bot.answer_callback_query(call.id, "❌ No tienes permisos")
         return
-
-    # ----- Solicitudes Pendientes -----
+    
     if call.data == "admin_pending":
-        try:
-            r = requests.get(f"{BASE_URL}/api/wallet-requests/pending")
-            if r.status_code == 200:
-                data = r.json()
-                if not data:
-                    bot.send_message(call.message.chat.id, "✅ No hay solicitudes pendientes")
-                else:
-                    for req in data:
-                        kb = InlineKeyboardMarkup(row_width=2)
-                        kb.add(
-                            InlineKeyboardButton("✅ Aprobar", callback_data=f"approve_{req['id']}"),
-                            InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{req['id']}")
-                        )
-                        txt = (
-                            f"📋 *Solicitud #{req['id']}*\n"
-                            f"👤 Usuario: {req['telegram_id']}\n"
-                            f"📊 Tipo: {req['type'].upper()}\n"
-                            f"💰 Monto: {req['amount']} {req['currency']}\n"
-                            f"🔗 Red: {req['network']}\n"
-                            f"📝 TXID: {req.get('txid', 'N/A')}\n"
-                            f"📅 Fecha: {req['created_at'][:16] if req.get('created_at') else 'N/A'}"
-                        )
-                        bot.send_message(call.message.chat.id, txt, parse_mode='Markdown', reply_markup=kb)
-            else:
-                bot.send_message(call.message.chat.id, "❌ Error al obtener solicitudes")
-        except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ Error: {str(e)}")
-
-    # ----- Estadísticas -----
+        show_pending_requests(call.message)
     elif call.data == "admin_stats":
-        try:
-            r = requests.get(f"{BASE_URL}/api/stats")
-            if r.status_code == 200:
-                s = r.json()
-                txt = (
-                    f"📊 *Estadísticas*\n"
-                    f"👥 Usuarios: {s['total_users']}\n"
-                    f"🚀 Naves: {s['total_ships']}\n"
-                    f"👾 Aliens: {s['total_aliens']}\n"
-                    f"💠 USDT en circulación: {s['total_usdt']:.2f}\n"
-                    f"⭐ Stars en circulación: {s['total_stars']:.0f}\n"
-                    f"📦 Listados P2P activos: {s['active_listings']}\n"
-                    f"📋 Solicitudes pendientes: {s['pending_requests']}"
-                )
-                bot.send_message(call.message.chat.id, txt, parse_mode='Markdown')
-            else:
-                bot.send_message(call.message.chat.id, "❌ Error al obtener estadísticas")
-        except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ Error: {str(e)}")
-
-    # ----- Usuarios -----
+        show_stats(call.message)
     elif call.data == "admin_users":
-        try:
-            r = requests.get(f"{BASE_URL}/api/users")
-            if r.status_code == 200:
-                users = r.json()
-                if not users:
-                    bot.send_message(call.message.chat.id, "👥 No hay usuarios registrados")
-                else:
-                    txt = "👥 *Usuarios registrados*\n\n"
-                    for u in users[:15]:
-                        txt += (
-                            f"• {u.get('telegram_name', 'Sin nombre')} "
-                            f"(@{u.get('telegram_username', 'sin usuario')}) - "
-                            f"💠{u['balance_usdt']:.2f} ⭐{u['balance_stars']:.0f}\n"
-                        )
-                    if len(users) > 15:
-                        txt += f"\n... y {len(users) - 15} más"
-                    bot.send_message(call.message.chat.id, txt, parse_mode='Markdown')
-            else:
-                bot.send_message(call.message.chat.id, "❌ Error al obtener usuarios")
-        except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ Error: {str(e)}")
-
-    # ----- Listados P2P -----
+        show_users(call.message)
     elif call.data == "admin_p2p":
-        try:
-            r = requests.get(f"{BASE_URL}/api/p2p/listings/active")
-            if r.status_code == 200:
-                listings = r.json()
-                if not listings:
-                    bot.send_message(call.message.chat.id, "📦 No hay listados P2P activos")
-                else:
-                    txt = "📦 *Listados P2P activos*\n\n"
-                    for l in listings[:10]:
-                        txt += (
-                            f"• {l['name']} ({l['rarity']}) - "
-                            f"💠{l['price']:.2f} - "
-                            f"Vendedor: @{l['seller_name']}\n"
-                        )
-                    if len(listings) > 10:
-                        txt += f"\n... y {len(listings) - 10} más"
-                    bot.send_message(call.message.chat.id, txt, parse_mode='Markdown')
-            else:
-                bot.send_message(call.message.chat.id, "❌ Error al obtener listados")
-        except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ Error: {str(e)}")
-
-    # ----- VER TABLAS COMPLETAS (NUEVO) -----
+        show_p2p_listings(call.message)
     elif call.data == "admin_tables":
-        try:
-            r = requests.get(f"{BASE_URL}/api/admin/tables")
-            if r.status_code == 200:
-                data = r.json()
-                msg = "📊 *TABLAS DE LA BASE DE DATOS*\n\n"
-
-                # Usuarios
-                msg += "👥 *USUARIOS*\n"
-                if data['usuarios']:
-                    for u in data['usuarios'][:10]:
-                        msg += (
-                            f"• ID:{u['id']} | {u['nombre']} (@{u['username']}) | "
-                            f"💠{u['usdt']:.2f} ⭐{u['stars']:.0f} | "
-                            f"🚀{u['naves']} 👾{u['aliens']} | ⛽{u['combustible']:.0f}\n"
-                        )
-                    if len(data['usuarios']) > 10:
-                        msg += f"... y {len(data['usuarios'])-10} más\n"
-                else:
-                    msg += "   (vacía)\n"
-
-                # Solicitudes
-                msg += "\n📋 *SOLICITUDES DE BILLETERA*\n"
-                if data['solicitudes']:
-                    for s in data['solicitudes'][:10]:
-                        msg += (
-                            f"• #{s['id']} | Usuario:{s['usuario']} | "
-                            f"{s['tipo'].upper()} {s['monto']} {s['moneda']} | "
-                            f"Estado: {s['estado']}\n"
-                        )
-                    if len(data['solicitudes']) > 10:
-                        msg += f"... y {len(data['solicitudes'])-10} más\n"
-                else:
-                    msg += "   (vacía)\n"
-
-                # Listados P2P
-                msg += "\n📦 *LISTADOS P2P*\n"
-                if data['listados_p2p']:
-                    for l in data['listados_p2p'][:10]:
-                        msg += (
-                            f"• {l['nombre']} ({l['rareza']}) | "
-                            f"💠{l['precio']:.2f} | "
-                            f"Vendedor: @{l['vendedor']} | "
-                            f"Estado: {l['estado']}\n"
-                        )
-                    if len(data['listados_p2p']) > 10:
-                        msg += f"... y {len(data['listados_p2p'])-10} más\n"
-                else:
-                    msg += "   (vacía)\n"
-
-                # Enviar mensaje (si es muy largo, partir en varios)
-                if len(msg) > 4096:
-                    for x in range(0, len(msg), 4096):
-                        bot.send_message(call.message.chat.id, msg[x:x+4096], parse_mode='Markdown')
-                else:
-                    bot.send_message(call.message.chat.id, msg, parse_mode='Markdown')
-            else:
-                bot.send_message(call.message.chat.id, "❌ Error al obtener las tablas")
-        except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ Error: {str(e)}")
-
-    # ----- RESETEAR BASE DE DATOS (NUEVO) -----
+        show_tables(call.message)
     elif call.data == "admin_reset":
-        # Confirmación con botón
-        kb = InlineKeyboardMarkup(row_width=2)
-        kb.add(
-            InlineKeyboardButton("✅ Sí, resetear", callback_data="reset_confirm"),
-            InlineKeyboardButton("❌ Cancelar", callback_data="reset_cancel")
-        )
-        bot.send_message(
-            call.message.chat.id,
-            "⚠️ *¿Estás seguro de que quieres resetear la base de datos?*\n"
-            "Se borrarán TODOS los datos (usuarios, transacciones, listados).\n"
-            "Esta acción no se puede deshacer.",
-            parse_mode='Markdown',
-            reply_markup=kb
-        )
-
+        ask_reset_confirmation(call.message)
+    
     bot.answer_callback_query(call.id)
 
-# ---------- CALLBACKS DE APROBAR/RECHAZAR ----------
-@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('reject_'))
-def handle_approve_reject(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "No autorizado")
+# ---------- SOLICITUDES PENDIENTES ----------
+def show_pending_requests(message):
+    requests_data = api_request('GET', '/api/wallet-requests/pending')
+    if not requests_data:
+        requests_data = db.get_pending_requests()
+    
+    if not requests_data:
+        bot.send_message(message.chat.id, "✅ No hay solicitudes pendientes")
         return
+    
+    for req in requests_data:
+        keyboard = InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            InlineKeyboardButton("✅ Aprobar", callback_data=f"approve_{req['id']}"),
+            InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{req['id']}")
+        )
+        
+        text = f"""
+📋 *Solicitud #{req['id']}*
+👤 Usuario: {req.get('telegram_name', 'Desconocido')}
+🆔 ID: {req.get('telegram_id')}
+📊 Tipo: {req.get('type', 'N/A').upper()}
+💰 Monto: {req.get('amount', 0)} {req.get('currency', 'USDT')}
+🔗 Red: {req.get('network', 'N/A')}
+📝 TXID: {req.get('txid', 'N/A')}
+📅 Fecha: {req.get('created_at', '')[:16] if req.get('created_at') else 'N/A'}
+"""
+        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=keyboard)
+
+# ---------- ESTADÍSTICAS ----------
+def show_stats(message):
+    stats = api_request('GET', '/api/stats')
+    if not stats:
+        users = db.users
+        pending = len(db.get_pending_requests())
+        stats = {
+            'total_users': len(users),
+            'total_ships': 0,
+            'total_aliens': 0,
+            'total_usdt': 0,
+            'total_stars': 0,
+            'active_listings': 0,
+            'pending_requests': pending
+        }
+        for user in users.values():
+            stats['total_ships'] += len(user.get('ships', []))
+            stats['total_aliens'] += len(user.get('aliens', []))
+            stats['total_usdt'] += user.get('balance_usdt', 0)
+            stats['total_stars'] += user.get('balance_stars', 0)
+    
+    text = f"""
+📊 *Estadísticas de XENOPORT*
+
+👥 *Usuarios:* {stats.get('total_users', 0)}
+🚀 *Naves totales:* {stats.get('total_ships', 0)}
+👾 *Aliens totales:* {stats.get('total_aliens', 0)}
+
+💰 *Economía:*
+💠 USDT en circulación: {stats.get('total_usdt', 0):.2f}
+⭐ Stars en circulación: {stats.get('total_stars', 0):.0f}
+
+📦 *Mercado P2P:* {stats.get('active_listings', 0)} activos
+📋 *Solicitudes pendientes:* {stats.get('pending_requests', 0)}
+"""
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+# ---------- USUARIOS ----------
+def show_users(message):
+    users = api_request('GET', '/api/users')
+    if not users:
+        users = list(db.users.values())
+    
+    if not users:
+        bot.send_message(message.chat.id, "👥 No hay usuarios registrados")
+        return
+    
+    text = "👥 *Usuarios Registrados*\n\n"
+    for user in users[:15]:
+        name = user.get('telegram_name', 'Usuario')
+        username = user.get('telegram_username', '')
+        usdt = user.get('balance_usdt', 0)
+        stars = user.get('balance_stars', 0)
+        ships = len(user.get('ships', []))
+        aliens = len(user.get('aliens', []))
+        text += f"• {name} (@{username}) - 💠{usdt:.2f} ⭐{stars:.0f} 🚀{ships} 👾{aliens}\n"
+    
+    if len(users) > 15:
+        text += f"\n... y {len(users) - 15} más"
+    
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+# ---------- LISTADOS P2P ----------
+def show_p2p_listings(message):
+    listings = api_request('GET', '/api/p2p/listings/active')
+    if not listings:
+        bot.send_message(message.chat.id, "📦 No hay listados P2P activos")
+        return
+    
+    text = "📦 *Listados P2P Activos*\n\n"
+    for l in listings[:10]:
+        name = l.get('name', 'Desconocido')
+        rarity = l.get('rarity', 'Común')
+        price = l.get('price', 0)
+        seller = l.get('seller_name', 'Anónimo')
+        item_type = l.get('type', 'item').upper()
+        text += f"• {name} ({rarity}) - 💠{price:.2f} - {item_type} - Vendedor: @{seller}\n"
+    
+    if len(listings) > 10:
+        text += f"\n... y {len(listings) - 10} más"
+    
+    bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+# ---------- VER TABLAS (NUEVO) ----------
+def show_tables(message):
+    try:
+        r = requests.get(f"{API_URL}/api/admin/tables", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            msg = "📊 *TABLAS DE LA BASE DE DATOS*\n\n"
+
+            # Usuarios
+            msg += "👥 *USUARIOS*\n"
+            if data.get('usuarios'):
+                for u in data['usuarios'][:10]:
+                    msg += (
+                        f"• ID:{u['id']} | {u['nombre']} (@{u['username']}) | "
+                        f"💠{u['usdt']:.2f} ⭐{u['stars']:.0f} | "
+                        f"🚀{u['naves']} 👾{u['aliens']} | ⛽{u['combustible']:.0f}\n"
+                    )
+                if len(data['usuarios']) > 10:
+                    msg += f"... y {len(data['usuarios'])-10} más\n"
+            else:
+                msg += "   (vacía)\n"
+
+            # Solicitudes
+            msg += "\n📋 *SOLICITUDES DE BILLETERA*\n"
+            if data.get('solicitudes'):
+                for s in data['solicitudes'][:10]:
+                    msg += (
+                        f"• #{s['id']} | Usuario:{s['usuario']} | "
+                        f"{s['tipo'].upper()} {s['monto']} {s['moneda']} | "
+                        f"Estado: {s['estado']}\n"
+                    )
+                if len(data['solicitudes']) > 10:
+                    msg += f"... y {len(data['solicitudes'])-10} más\n"
+            else:
+                msg += "   (vacía)\n"
+
+            # Listados P2P
+            msg += "\n📦 *LISTADOS P2P*\n"
+            if data.get('listados_p2p'):
+                for l in data['listados_p2p'][:10]:
+                    msg += (
+                        f"• {l['nombre']} ({l['rareza']}) | "
+                        f"💠{l['precio']:.2f} | "
+                        f"Vendedor: @{l['vendedor']} | "
+                        f"Estado: {l['estado']}\n"
+                    )
+                if len(data['listados_p2p']) > 10:
+                    msg += f"... y {len(data['listados_p2p'])-10} más\n"
+            else:
+                msg += "   (vacía)\n"
+
+            # Enviar mensaje
+            if len(msg) > 4096:
+                for x in range(0, len(msg), 4096):
+                    bot.send_message(message.chat.id, msg[x:x+4096], parse_mode='Markdown')
+            else:
+                bot.send_message(message.chat.id, msg, parse_mode='Markdown')
+        else:
+            bot.send_message(message.chat.id, "❌ Error al obtener las tablas")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Error: {str(e)}")
+
+# ---------- RESETEAR BASE DE DATOS ----------
+def ask_reset_confirmation(message):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton("✅ Sí, resetear", callback_data="reset_confirm"),
+        InlineKeyboardButton("❌ Cancelar", callback_data="reset_cancel")
+    )
+    bot.send_message(
+        message.chat.id,
+        "⚠️ *¿Estás seguro de que quieres resetear la base de datos?*\n"
+        "Se borrarán TODOS los datos (usuarios, transacciones, listados).\n"
+        "Esta acción no se puede deshacer.",
+        parse_mode='Markdown',
+        reply_markup=keyboard
+    )
+
+# ---------- APROBAR/RECHAZAR SOLICITUDES ----------
+@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('reject_'))
+def handle_request_action(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ No tienes permisos")
+        return
+    
     parts = call.data.split('_')
     action = parts[0]
-    req_id = int(parts[1])
-    try:
-        r = requests.put(f"{BASE_URL}/api/wallet-requests/{req_id}", json={"status": action})
-        if r.status_code == 200:
-            req = r.json()
-            user_id = req['telegram_id']
-            # Notificar al usuario
-            try:
-                bot.send_message(
-                    user_id,
-                    f"✅ *Tu solicitud #{req_id} ha sido {action}ada*",
-                    parse_mode='Markdown'
+    request_id = int(parts[1])
+    
+    result = api_request('PUT', f'/api/wallet-requests/{request_id}', {"status": action})
+    if not result:
+        result = db.update_request(request_id, action)
+    
+    if result:
+        req = api_request('GET', f'/api/wallet-requests/{request_id}')
+        if not req:
+            req = db.get_request(request_id)
+        
+        if req:
+            user_id = req.get('telegram_id')
+            amount = req.get('amount', 0)
+            currency = req.get('currency', 'USDT')
+            
+            if action == 'approved':
+                try:
+                    bot.send_message(
+                        user_id,
+                        f"✅ *Tu solicitud #{request_id} ha sido APROBADA!*\n\n💰 Monto: {amount} {currency}\n💠 Tu saldo ha sido actualizado.",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+                bot.edit_message_text(
+                    f"✅ Solicitud #{request_id} APROBADA correctamente",
+                    call.message.chat.id,
+                    call.message.message_id
                 )
-            except:
-                pass
-            bot.edit_message_text(
-                f"Solicitud #{req_id} {action}ada correctamente",
-                call.message.chat.id,
-                call.message.message_id
-            )
-        else:
-            bot.answer_callback_query(call.id, "Error al procesar")
-    except Exception as e:
-        bot.answer_callback_query(call.id, f"Error: {str(e)}")
+            else:
+                try:
+                    bot.send_message(
+                        user_id,
+                        f"❌ *Tu solicitud #{request_id} ha sido RECHAZADA*\n\n💰 Monto: {amount} {currency}\n📝 Motivo: Revisión manual no aprobada.",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+                bot.edit_message_text(
+                    f"❌ Solicitud #{request_id} RECHAZADA",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+    else:
+        bot.answer_callback_query(call.id, "❌ Error al procesar la solicitud")
 
-# ---------- CALLBACK DE RESET CONFIRMACIÓN ----------
+# ---------- RESET CONFIRMACIÓN ----------
 @bot.callback_query_handler(func=lambda call: call.data in ["reset_confirm", "reset_cancel"])
 def reset_confirmation(call):
     if call.from_user.id != ADMIN_ID:
@@ -803,9 +536,8 @@ def reset_confirmation(call):
         bot.answer_callback_query(call.id)
         return
 
-    # Confirmar reset
     try:
-        r = requests.post(f"{BASE_URL}/api/admin/reset")
+        r = requests.post(f"{API_URL}/api/admin/reset", timeout=10)
         if r.status_code == 200:
             bot.edit_message_text(
                 "✅ *Base de datos reseteada correctamente.*\n"
@@ -829,25 +561,38 @@ def reset_confirmation(call):
     bot.answer_callback_query(call.id)
 
 # ---------- MENSAJES POR DEFECTO ----------
-@bot.message_handler(func=lambda m: True)
-def default(m):
-    bot.send_message(m.chat.id, "Usa los botones del menú o /start")
+@bot.message_handler(func=lambda message: True)
+def default_message(message):
+    if message.text and message.text.startswith('/'):
+        return
+    
+    help_text = """
+❓ *Comandos disponibles:*
 
-# ============ INICIAR BOT EN HILO ============
+🎮 *PLAY* - Abrir el juego
+📋 *Perfil* - Ver tu perfil
+💰 *Saldo* - Ver tu saldo
+🔐 *Panel Admin* - Panel de administración (solo admin)
+
+O usa los botones del menú.
+"""
+    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+
+# ============ FUNCIÓN PARA INICIAR EL BOT ============
 def run_bot():
-    logger.info("🤖 Bot de Telegram iniciado...")
+    """Función principal para iniciar el bot"""
+    logger.info("🚀 Bot de XENOPORT iniciado...")
+    logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...")
+    logger.info(f"👤 Admin ID: {ADMIN_ID}")
+    logger.info(f"🌐 API URL: {API_URL}")
+    logger.info("✅ Bot listo para usar!")
+    
     try:
-        bot.polling(non_stop=True, interval=1)
+        bot.polling(non_stop=True, interval=1, timeout=30)
     except Exception as e:
-        logger.error(f"Error en el bot: {e}")
+        logger.error(f"❌ Error en el bot: {e}")
         time.sleep(5)
         run_bot()
 
-# ============ ARRANQUE PRINCIPAL ============
 if __name__ == "__main__":
-    # Iniciar el bot en un hilo
-    thread = threading.Thread(target=run_bot, daemon=True)
-    thread.start()
-    logger.info("🚀 Servidor FastAPI iniciando...")
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    run_bot()
