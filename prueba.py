@@ -1,545 +1,297 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-import requests
-import logging
+import random
 import os
-import time
 import threading
-from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio
+import atexit
+from datetime import datetime, timedelta
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# ============ CONFIGURACIÓN ============
-# El token se lee desde las variables de entorno de Render.
-BOT_TOKEN = os.getenv('BOT_TOKEN', '')
+# --- Configuración de Base de Datos (local, archivo SQLite) ---
+DB_NAME = "flowerland.db"
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///./{DB_NAME}")
+
+# SQLite necesita este flag porque el bot corre en un hilo aparte de FastAPI
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# --- Configuración de Telegram ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8206009148:AAEEWSYAgxj3MRR8xGOe-s7V5COl5htsYnY")
 ADMIN_ID = 6808824866
-# 🔥 IMPORTANTE: En Render, la variable API_URL debe apuntar a tu BACKEND (FastAPI), no al bot.
-API_URL = os.getenv('API_URL', 'https://comando-evkk.onrender.com')       
-GAME_URL = os.getenv('GAME_URL', 'https://aesthetic-chaja-a87a4e.netlify.app/')     # URL del juego (HTML)
-PORT = int(os.environ.get('PORT', 8080))
+GRUPO_TELEGRAM_ID = int(os.getenv("GRUPO_TELEGRAM_ID", "-1001234567890"))
+MINI_APP_URL = "https://aesthetic-chaja-a87a4e.netlify.app/" 
 
-# Verificar token (Evita que el bot arranque si no hay token configurado)
-if not BOT_TOKEN or len(BOT_TOKEN) < 20:
-    print("❌ ERROR CRÍTICO: Token inválido o vacío. Asegúrate de configurar BOT_TOKEN en las variables de entorno de Render.")
-    exit(1)
+try:
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+except Exception as e:
+    print(f"Error inicializando el bot de Telegram: {e}")
+    bot = None
 
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# --- Modelos de Base de Datos ---
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    lan_balance = Column(Float, default=0.0)
+    telegram_id = Column(Integer, nullable=True)
+    is_admin = Column(Boolean, default=False)
 
-# Inicializar bot
-bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+class Land(Base):
+    __tablename__ = "lands"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    type = Column(String)
+    slots_total = Column(Integer)
+    is_free_land = Column(Boolean, default=False)
 
-# ============ SERVIDOR HTTP PARA KEEP-ALIVE (Render) ============
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Bot is running')
-    
-    def log_message(self, format, *args):
-        return  # Silenciar logs del servidor HTTP
+class Plant(Base):
+    __tablename__ = "plants"
+    id = Column(Integer, primary_key=True, index=True)
+    land_id = Column(Integer, ForeignKey("lands.id"))
+    name = Column(String)
+    rarity = Column(String)
+    total_time_hours = Column(Float)
+    start_time = Column(DateTime, default=datetime.utcnow)
+    is_harvested = Column(Boolean, default=False)
 
-def run_http_server():
-    server = HTTPServer(('0.0.0.0', PORT), KeepAliveHandler)
-    logger.info(f"🌐 Servidor HTTP escuchando en el puerto {PORT} (para mantener vivo el bot)")
-    server.serve_forever()
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    type = Column(String)
+    amount = Column(Float)
+    status = Column(String, default="pendiente")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)
+    processed_by = Column(Integer, nullable=True)
 
-# ============ FUNCIONES DE API (Única conexión a la Base de Datos) ============
-def api_request(method, endpoint, data=None):
-    """Función para hacer peticiones a la API (conecta con Supabase/Backend)"""
-    url = f"{API_URL}{endpoint}"
+try:
+    print(f"Verificando tablas en la base de datos local '{DB_NAME}'...")
+    Base.metadata.create_all(bind=engine)
+    print("Base de datos local lista y conectada.")
+except Exception as db_err:
+    print(f"Tablas listas o error al conectar con la base de datos local: {db_err}")
+
+PLANT_DEFINITIONS = {
+    "Comun": {"min_time": 1, "max_time": 4, "price": 5, "lan_reward_min": 10, "lan_reward_max": 20},
+    "PocoComun": {"min_time": 5, "max_time": 12, "price": 15, "lan_reward_min": 30, "lan_reward_max": 50},
+    "Epica": {"min_time": 13, "max_time": 24, "price": 40, "lan_reward_min": 80, "lan_reward_max": 150},
+    "Legendaria": {"min_time": 25, "max_time": 72, "price": 100, "lan_reward_min": 200, "lan_reward_max": 500}
+}
+
+LAND_PRICES = {"Comun": 10, "Rara": 30, "Legendaria": 80}
+
+class PlantResponse(BaseModel):
+    id: int
+    name: str
+    rarity: str
+    total_time_hours: float
+    progress_percent: float
+    time_remaining_hours: float
+    is_ready: bool
+
+class BuyLandRequest(BaseModel):
+    land_type: str
+
+class PlantSeedRequest(BaseModel):
+    land_id: int
+    slot_index: int
+    rarity: str
+
+class LinkTelegramRequest(BaseModel):
+    telegram_id: int
+
+class TransactionRequest(BaseModel):
+    type: str  
+    amount: float
+
+class ProcessTransactionRequest(BaseModel):
+    transaction_id: int
+    action: str  
+
+def get_db():
+    db = SessionLocal()
     try:
-        if method == 'GET':
-            response = requests.get(url, timeout=10)
-        elif method == 'POST':
-            response = requests.post(url, json=data, timeout=10)
-        elif method == 'PUT':
-            response = requests.put(url, json=data, timeout=10)
-        else:
-            return None
-        
-        if response.status_code == 200:
-            return response.json()
-        logger.warning(f"API error {response.status_code}: {response.text}")
-        return None
-    except Exception as e:
-        logger.error(f"Error en api_request: {e}")
-        return None
+        yield db
+    finally:
+        db.close()
 
-# ============ COMANDOS PRINCIPALES ============
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "Usuario"
-    name = message.from_user.first_name or ""
-    
-    logger.info(f"📥 /start desde {user_id} (@{username})")
-    
-    # Registrar usuario DIRECTAMENTE en la API (sin LocalDB)
-    user_data = {
-        'telegram_id': user_id,
-        'telegram_username': username,
-        'telegram_name': name
-    }
-    api_request('POST', '/api/users', user_data)
-    
-    # Crear teclado
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    play_btn = KeyboardButton("🎮 PLAY")
-    profile_btn = KeyboardButton("📋 Perfil")
-    balance_btn = KeyboardButton("💰 Saldo")
-    keyboard.add(play_btn, profile_btn, balance_btn)
-    
-    if user_id == ADMIN_ID:
-        admin_btn = KeyboardButton("🔐 Panel Admin")
-        keyboard.add(admin_btn)
-    
-    welcome_text = f"""
-🚀 *¡Bienvenido a XENOPORT, Capitán {name}!*
+def verify_admin(telegram_id: int, db: Session):
+    user = db.query(User).filter(User.telegram_id == telegram_id).first()
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Acceso denegado. Solo administradores.")
+    return user
 
-Tu aventura espacial comienza aquí. 
-Explora el universo, recolecta naves y alienígenas.
+# --- Instancia de FastAPI ---
+app = FastAPI(title="GranjaP2P API")
 
-🌌 *¡Que la fuerza te acompañe!*
-"""
-    
-    bot.send_message(
-        message.chat.id, 
-        welcome_text, 
-        parse_mode='Markdown',
-        reply_markup=keyboard
-    )
-
-@bot.message_handler(func=lambda message: message.text == "🎮 PLAY")
-def play_button(message):
-    keyboard = InlineKeyboardMarkup()
-    play_btn = InlineKeyboardButton("🚀 ABRIR XENOPORT", url=GAME_URL)
-    keyboard.add(play_btn)
-    
-    bot.send_message(
-        message.chat.id,
-        "🛸 *Prepárate para la aventura espacial!*\n\nHaz clic en el botón para comenzar:",
-        parse_mode='Markdown',
-        reply_markup=keyboard
-    )
-
-@bot.message_handler(func=lambda message: message.text == "📋 Perfil")
-def profile_button(message):
-    user_id = message.from_user.id
-    user = api_request('GET', f'/api/users/{user_id}')
-    
-    if not user:
-        bot.send_message(message.chat.id, "❌ No se pudo obtener tu perfil. Asegúrate de haber usado /start primero.")
-        return
-    
-    ships_count = len(user.get('ships', []))
-    aliens_count = len(user.get('aliens', []))
-    
-    profile_text = f"""
-📋 *Tu Perfil*
-
-🆔 ID: {user.get('telegram_id')}
-👤 Nombre: {user.get('telegram_name', 'Sin nombre')}
-🐦 Usuario: @{user.get('telegram_username', 'sin usuario')}
-
-💰 *Saldo:*
-💠 USDT: {user.get('balance_usdt', 0):.2f}
-⭐ Stars: {user.get('balance_stars', 0):.0f}
-⛽ Combustible: {user.get('fuel_available', 0):.0f}
-
-🚀 *Inventario:*
-Naves: {ships_count}
-Aliens: {aliens_count}
-
-📅 Miembro desde: {user.get('created_at', '')[:10] if user.get('created_at') else 'N/A'}
-"""
-    bot.send_message(message.chat.id, profile_text, parse_mode='Markdown')
-
-@bot.message_handler(func=lambda message: message.text == "💰 Saldo")
-def balance_button(message):
-    user_id = message.from_user.id
-    user = api_request('GET', f'/api/users/{user_id}')
-    
-    if not user:
-        bot.send_message(message.chat.id, "❌ No se pudo obtener tu saldo.")
-        return
-    
-    balance_text = f"""
-💰 *Tu Saldo*
-
-💠 *USDT:* {user.get('balance_usdt', 0):.2f}
-⭐ *Stars:* {user.get('balance_stars', 0):.0f}
-⛽ *Combustible:* {user.get('fuel_available', 0):.0f}
-
-📊 *Total de activos:*
-🚀 Naves: {len(user.get('ships', []))}
-👾 Aliens: {len(user.get('aliens', []))}
-"""
-    bot.send_message(message.chat.id, balance_text, parse_mode='Markdown')
-
-# ============ PANEL DE ADMINISTRACIÓN ============
-@bot.message_handler(func=lambda message: message.text == "🔐 Panel Admin")
-def admin_panel_button(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.chat.id, "❌ No tienes permisos de administrador")
-        return
-    
-    show_admin_panel(message.chat.id)
-
-def show_admin_panel(chat_id):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton("📋 Solicitudes Pendientes", callback_data="admin_pending"),
-        InlineKeyboardButton("📊 Estadísticas", callback_data="admin_stats")
-    )
-    keyboard.add(
-        InlineKeyboardButton("👥 Usuarios", callback_data="admin_users"),
-        InlineKeyboardButton("📦 Listados P2P", callback_data="admin_p2p")
-    )
-    keyboard.add(
-        InlineKeyboardButton("📊 Ver Tablas", callback_data="admin_tables"),
-        InlineKeyboardButton("🗑️ Resetear Base de Datos", callback_data="admin_reset")
-    )
-    
-    bot.send_message(
-        chat_id,
-        "🔐 *Panel de Administración de XENOPORT*\n\nSelecciona una opción:",
-        parse_mode='Markdown',
-        reply_markup=keyboard
-    )
-
-# ============ CALLBACKS DEL ADMIN ============
-@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
-def handle_admin_callbacks(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ No tienes permisos")
-        return
-    
-    if call.data == "admin_pending":
-        show_pending_requests(call.message)
-    elif call.data == "admin_stats":
-        show_stats(call.message)
-    elif call.data == "admin_users":
-        show_users(call.message)
-    elif call.data == "admin_p2p":
-        show_p2p_listings(call.message)
-    elif call.data == "admin_tables":
-        show_tables(call.message)
-    elif call.data == "admin_reset":
-        ask_reset_confirmation(call.message)
-    
-    bot.answer_callback_query(call.id)
-
-# ---------- SOLICITUDES PENDIENTES ----------
-def show_pending_requests(message):
-    requests_data = api_request('GET', '/api/wallet-requests/pending')
-    
-    if not requests_data:
-        bot.send_message(message.chat.id, "✅ No hay solicitudes pendientes")
-        return
-    
-    for req in requests_data:
-        keyboard = InlineKeyboardMarkup(row_width=2)
-        keyboard.add(
-            InlineKeyboardButton("✅ Aprobar", callback_data=f"approve_{req['id']}"),
-            InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{req['id']}")
-        )
-        
-        text = f"""
-📋 *Solicitud #{req['id']}*
-👤 Usuario: {req.get('telegram_name', 'Desconocido')}
-🆔 ID: {req.get('telegram_id')}
-📊 Tipo: {req.get('type', 'N/A').upper()}
-💰 Monto: {req.get('amount', 0)} {req.get('currency', 'USDT')}
-🔗 Red: {req.get('network', 'N/A')}
-📝 TXID: {req.get('txid', 'N/A')}
-📅 Fecha: {req.get('created_at', '')[:16] if req.get('created_at') else 'N/A'}
-"""
-        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=keyboard)
-
-# ---------- ESTADÍSTICAS ----------
-def show_stats(message):
-    stats = api_request('GET', '/api/stats')
-    
-    if not stats:
-        bot.send_message(message.chat.id, "❌ No se pudieron cargar las estadísticas en este momento.")
-        return
-    
-    text = f"""
-📊 *Estadísticas de XENOPORT*
-
-👥 *Usuarios:* {stats.get('total_users', 0)}
-🚀 *Naves totales:* {stats.get('total_ships', 0)}
-👾 *Aliens totales:* {stats.get('total_aliens', 0)}
-
-💰 *Economía:*
-💠 USDT en circulación: {stats.get('total_usdt', 0):.2f}
-⭐ Stars en circulación: {stats.get('total_stars', 0):.0f}
-
-📦 *Mercado P2P:* {stats.get('active_listings', 0)} activos
-📋 *Solicitudes pendientes:* {stats.get('pending_requests', 0)}
-"""
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
-
-# ---------- USUARIOS ----------
-def show_users(message):
-    users = api_request('GET', '/api/users')
-    
-    if not users:
-        bot.send_message(message.chat.id, "👥 No hay usuarios registrados o hubo un error al obtenerlos.")
-        return
-    
-    text = "👥 *Usuarios Registrados*\n\n"
-    for user in users[:15]:
-        name = user.get('telegram_name', 'Usuario')
-        username = user.get('telegram_username', '')
-        usdt = user.get('balance_usdt', 0)
-        stars = user.get('balance_stars', 0)
-        ships = len(user.get('ships', []))
-        aliens = len(user.get('aliens', []))
-        text += f"• {name} (@{username}) - 💠{usdt:.2f} ⭐{stars:.0f} 🚀{ships} 👾{aliens}\n"
-    
-    if len(users) > 15:
-        text += f"\n... y {len(users) - 15} más"
-    
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
-
-# ---------- LISTADOS P2P ----------
-def show_p2p_listings(message):
-    listings = api_request('GET', '/api/p2p/listings/active')
-    if not listings:
-        bot.send_message(message.chat.id, "📦 No hay listados P2P activos")
-        return
-    
-    text = "📦 *Listados P2P Activos*\n\n"
-    for l in listings[:10]:
-        name = l.get('name', 'Desconocido')
-        rarity = l.get('rarity', 'Común')
-        price = l.get('price', 0)
-        seller = l.get('seller_name', 'Anónimo')
-        item_type = l.get('type', 'item').upper()
-        text += f"• {name} ({rarity}) - 💠{price:.2f} - {item_type} - Vendedor: @{seller}\n"
-    
-    if len(listings) > 10:
-        text += f"\n... y {len(listings) - 10} más"
-    
-    bot.send_message(message.chat.id, text, parse_mode='Markdown')
-
-# ---------- VER TABLAS ----------
-def show_tables(message):
-    try:
-        r = requests.get(f"{API_URL}/api/admin/tables", timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            msg = "📊 *TABLAS DE LA BASE DE DATOS*\n\n"
-
-            msg += "👥 *USUARIOS*\n"
-            if data.get('usuarios'):
-                for u in data['usuarios'][:10]:
-                    msg += (
-                        f"• ID:{u['id']} | {u['nombre']} (@{u['username']}) | "
-                        f"💠{u['usdt']:.2f} ⭐{u['stars']:.0f} | "
-                        f"🚀{u['naves']} 👾{u['aliens']} | ⛽{u['combustible']:.0f}\n"
-                    )
-                if len(data['usuarios']) > 10:
-                    msg += f"... y {len(data['usuarios'])-10} más\n"
-            else:
-                msg += "   (vacía)\n"
-
-            msg += "\n📋 *SOLICITUDES DE BILLETERA*\n"
-            if data.get('solicitudes'):
-                for s in data['solicitudes'][:10]:
-                    msg += (
-                        f"• #{s['id']} | Usuario:{s['usuario']} | "
-                        f"{s['tipo'].upper()} {s['monto']} {s['moneda']} | "
-                        f"Estado: {s['estado']}\n"
-                    )
-                if len(data['solicitudes']) > 10:
-                    msg += f"... y {len(data['solicitudes'])-10} más\n"
-            else:
-                msg += "   (vacía)\n"
-
-            msg += "\n📦 *LISTADOS P2P*\n"
-            if data.get('listados_p2p'):
-                for l in data['listados_p2p'][:10]:
-                    msg += (
-                        f"• {l['nombre']} ({l['rareza']}) | "
-                        f"💠{l['precio']:.2f} | "
-                        f"Vendedor: @{l['vendedor']} | "
-                        f"Estado: {l['estado']}\n"
-                    )
-                if len(data['listados_p2p']) > 10:
-                    msg += f"... y {len(data['listados_p2p'])-10} más\n"
-            else:
-                msg += "   (vacía)\n"
-
-            if len(msg) > 4096:
-                for x in range(0, len(msg), 4096):
-                    bot.send_message(message.chat.id, msg[x:x+4096], parse_mode='Markdown')
-            else:
-                bot.send_message(message.chat.id, msg, parse_mode='Markdown')
-        else:
-            bot.send_message(message.chat.id, "❌ Error al obtener las tablas")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Error: {str(e)}")
-
-# ---------- RESET ----------
-def ask_reset_confirmation(message):
-    keyboard = InlineKeyboardMarkup(row_width=2)
-    keyboard.add(
-        InlineKeyboardButton("✅ Sí, resetear", callback_data="reset_confirm"),
-        InlineKeyboardButton("❌ Cancelar", callback_data="reset_cancel")
-    )
-    bot.send_message(
-        message.chat.id,
-        "⚠️ *¿Estás seguro de que quieres resetear la base de datos?*\n"
-        "Se borrarán TODOS los datos (usuarios, transacciones, listados).\n"
-        "Esta acción no se puede deshacer.",
-        parse_mode='Markdown',
-        reply_markup=keyboard
-    )
-
-# ---------- APROBAR/RECHAZAR ----------
-@bot.callback_query_handler(func=lambda call: call.data.startswith('approve_') or call.data.startswith('reject_'))
-def handle_request_action(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ No tienes permisos")
-        return
-    
-    parts = call.data.split('_')
-    action = parts[0]
-    request_id = int(parts[1])
-    
-    # Llamada directa a la API
-    result = api_request('PUT', f'/api/wallet-requests/{request_id}', {"status": action})
-    
-    if result:
-        req = api_request('GET', f'/api/wallet-requests/{request_id}')
-        
-        if req:
-            user_id = req.get('telegram_id')
-            amount = req.get('amount', 0)
-            currency = req.get('currency', 'USDT')
-            
-            if action == 'approved':
-                try:
-                    bot.send_message(
-                        user_id,
-                        f"✅ *Tu solicitud #{request_id} ha sido APROBADA!*\n\n💰 Monto: {amount} {currency}\n💠 Tu saldo ha sido actualizado.",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass
-                bot.edit_message_text(
-                    f"✅ Solicitud #{request_id} APROBADA correctamente",
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-            else:
-                try:
-                    bot.send_message(
-                        user_id,
-                        f"❌ *Tu solicitud #{request_id} ha sido RECHAZADA*\n\n💰 Monto: {amount} {currency}\n📝 Motivo: Revisión manual no aprobada.",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass
-                bot.edit_message_text(
-                    f"❌ Solicitud #{request_id} RECHAZADA",
-                    call.message.chat.id,
-                    call.message.message_id
-                )
-    else:
-        bot.answer_callback_query(call.id, "❌ Error al procesar la solicitud en el servidor")
-
-# ---------- RESET CONFIRMACIÓN ----------
-@bot.callback_query_handler(func=lambda call: call.data in ["reset_confirm", "reset_cancel"])
-def reset_confirmation(call):
-    if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "No autorizado")
-        return
-
-    if call.data == "reset_cancel":
-        bot.edit_message_text(
-            "❌ Reset cancelado.",
-            call.message.chat.id,
-            call.message.message_id
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    try:
-        r = requests.post(f"{API_URL}/api/admin/reset", timeout=10)
-        if r.status_code == 200:
-            bot.edit_message_text(
-                "✅ *Base de datos reseteada correctamente.*\n"
-                "Todas las tablas han sido vaciadas.",
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode='Markdown'
-            )
-        else:
-            bot.edit_message_text(
-                "❌ Error al resetear la base de datos.",
-                call.message.chat.id,
-                call.message.message_id
-            )
-    except Exception as e:
-        bot.edit_message_text(
-            f"❌ Error: {str(e)}",
-            call.message.chat.id,
-            call.message.message_id
-        )
-    bot.answer_callback_query(call.id)
-
-# ---------- MENSAJES POR DEFECTO ----------
-@bot.message_handler(func=lambda message: True)
-def default_message(message):
-    if message.text and message.text.startswith('/'):
-        return
-    
-    help_text = """
-❓ *Comandos disponibles:*
-
-🎮 *PLAY* - Abrir el juego
-📋 *Perfil* - Ver tu perfil
-💰 *Saldo* - Ver tu saldo
-🔐 *Panel Admin* - Panel de administración (solo admin)
-
-O usa los botones del menú.
-"""
-    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
-
-# ============ FUNCIÓN PARA INICIAR EL BOT (POLLING) ============
-def run_bot():
-    logger.info("🚀 Bot de XENOPORT iniciado (modo polling)...")
-    logger.info(f"🤖 Bot token: {BOT_TOKEN[:10]}...") 
-    logger.info(f"👤 Admin ID: {ADMIN_ID}")
-    logger.info(f"🌐 API URL: {API_URL}")
-    logger.info(f"🎮 GAME URL: {GAME_URL}")
-    logger.info("⏳ El bot está escuchando mensajes...")
-    
-    # Eliminar webhook existente para evitar conflictos
-    try:
-        bot.remove_webhook()
-        logger.info("✅ Webhook eliminado (modo polling activo)")
-    except Exception as e:
-        logger.warning(f"No se pudo eliminar webhook: {e}")
-    
-    while True:
+# --- Controladores de Mensajes de Telegram ---
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
         try:
-            bot.polling(non_stop=True, interval=1, timeout=30, long_polling_timeout=20)
+            chat_id = message.chat.id
+            first_name = message.from_user.first_name
+            
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(text="🌾 Jugar FlowerLand", web_app=WebAppInfo(url=MINI_APP_URL)))
+            
+            welcome_text = (
+                f"¡Hola *{first_name}*! 👋\n\n"
+                f"Bienvenido a *FlowerLand*, tu granja P2E.\n"
+                f"Presiona el botón de abajo para empezar a jugar."
+            )
+            bot.send_message(chat_id, welcome_text, parse_mode="Markdown", reply_markup=markup)
         except Exception as e:
-            logger.error(f"❌ Error en polling: {e}")
-            time.sleep(5)
+            print(f"Error en comando start: {e}")
 
-# ============ ARRANQUE PRINCIPAL ============
+    @bot.message_handler(commands=['help'])
+    def send_help(message):
+        help_text = "📌 *Comandos:*\n\n/start - Abrir app\n/help - Ayuda"
+        bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+
+# --- Polling Asíncrono Correcto para Render ---
+def run_bot():
+    if bot:
+        print("🤖 [Telegram] Iniciando polling del bot de forma segura...")
+        try:
+            bot.remove_webhook()
+            bot.infinity_polling(timeout=30, long_polling_timeout=15, skip_pending=True, drop_pending_updates=True)
+        except Exception as e:
+            print(f"❌ [Telegram] Error crítico en polling: {e}")
+
+# --- Evento de Inicio Seguro de FastAPI ---
+@app.on_event("startup")
+async def startup_event():
+    # Esto arranca el bot de Telegram de fondo garantizando que Render no mate el proceso al encender Uvicorn
+    thread = threading.Thread(target=run_bot)
+    thread.daemon = True
+    thread.start()
+    print("🚀 [FastAPI] Hilo de Telegram lanzado en segundo plano.")
+
+# Función para cerrar el bot correctamente
+@atexit.register
+def shutdown_handler():
+    if bot:
+        print("🛑 Cerrando bot de Telegram...")
+        bot.stop_polling()
+
+# --- Funciones de Notificaciones ---
+def send_telegram_notification(chat_id: int, message: str):
+    if bot and chat_id:
+        try: bot.send_message(chat_id, message, parse_mode="Markdown")
+        except Exception as e: print(f"Error notificación: {e}")
+
+def notify_admin(message: str): send_telegram_notification(ADMIN_ID, f"🔔 *Admin Alert*\n{message}")
+def notify_user(user_id: int, message: str): send_telegram_notification(user_id, message)
+
+def calculate_progress(plant: Plant):
+    elapsed = datetime.utcnow() - plant.start_time
+    elapsed_hours = elapsed.total_seconds() / 3600
+    progress = min(100, (elapsed_hours / plant.total_time_hours) * 100)
+    remaining = max(0, plant.total_time_hours - elapsed_hours)
+    return round(progress, 2), round(remaining, 2), progress >= 99.9
+
+def get_random_plant_name(rarity: str):
+    names = {
+        "Comun": ["Tomate", "Lechuga", "Zanahoria"],
+        "PocoComun": ["Fresa", "Pimiento", "Cebolla"],
+        "Epica": ["Orquídea", "Girasol Gigante", "Cactus Dorado"],
+        "Legendaria": ["Árbol Eterno", "Flor Lunar", "Raíz Ancestral"]
+    }
+    return random.choice(names.get(rarity, ["Planta Desconocida"]))
+
+# --- Endpoints Públicos ---
+@app.post("/register/{username}")
+def register_user(username: str, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.username == username).first()
+    if existing: raise HTTPException(status_code=400, detail="Usuario ya existe")
+    new_user = User(username=username, lan_balance=0.0)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"message": "Usuario registrado", "username": username}
+
+@app.get("/user/{username}")
+def get_user_profile(username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user: raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    lands = db.query(Land).filter(Land.user_id == user.id).all()
+    return {
+        "username": user.username, "lan_balance": user.lan_balance, "telegram_id": user.telegram_id,
+        "lands": [{"id": l.id, "type": l.type, "slots": l.slots_total} for l in lands]
+    }
+
+@app.post("/link-telegram/{username}")
+def link_telegram(username: str, request: LinkTelegramRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user: raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    user.telegram_id = request.telegram_id
+    db.commit()
+    notify_user(request.telegram_id, f"✅ ¡Hola {username}! Tu cuenta ha sido vinculada.")
+    return {"message": "Telegram vinculado correctamente"}
+
+@app.post("/buy-land")
+def buy_land(request: BuyLandRequest, username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    price = LAND_PRICES.get(request.land_type)
+    if not price or user.lan_balance < price: raise HTTPException(status_code=400, detail="Saldo insuficiente")
+    slots_map = {"Comun": 4, "Rara": 8, "Legendaria": 12}
+    user.lan_balance -= price
+    new_land = Land(user_id=user.id, type=request.land_type, slots_total=slots_map[request.land_type])
+    db.add(new_land)
+    db.commit()
+    return {"message": "Tierra comprada", "new_balance": user.lan_balance}
+
+@app.post("/plant-seed")
+def plant_seed(request: PlantSeedRequest, username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    land = db.query(Land).filter(Land.id == request.land_id, Land.user_id == user.id).first()
+    rarity_config = PLANT_DEFINITIONS.get(request.rarity)
+    if not land or not rarity_config or user.lan_balance < rarity_config["price"]:
+        raise HTTPException(status_code=400, detail="Error de requisitos")
+    random_time = random.uniform(rarity_config["min_time"], rarity_config["max_time"])
+    new_plant = Plant(land_id=request.land_id, name=get_random_plant_name(request.rarity), rarity=request.rarity, total_time_hours=random_time)
+    user.lan_balance -= rarity_config["price"]
+    db.add(new_plant)
+    db.commit()
+    return {"message": "Planta sembrada"}
+
+@app.get("/my-plants/{username}", response_model=List[PlantResponse])
+def get_my_plants(username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    user_lands = db.query(Land).filter(Land.user_id == user.id).all()
+    plants = db.query(Plant).filter(Plant.land_id.in_([l.id for l in user_lands]), Plant.is_harvested == False).all()
+    result = []
+    for p in plants:
+        progress, remaining, is_ready = calculate_progress(p)
+        result.append(PlantResponse(id=p.id, name=p.name, rarity=p.rarity, total_time_hours=p.total_time_hours, progress_percent=progress, time_remaining_hours=remaining, is_ready=is_ready))
+    return result
+
+@app.post("/harvest/{plant_id}")
+def harvest_plant(plant_id: int, username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    plant = db.query(Plant).filter(Plant.id == plant_id).first()
+    progress, remaining, is_ready = calculate_progress(plant)
+    if not is_ready: raise HTTPException(status_code=400, detail="Cultivo no listo")
+    reward = random.uniform(PLANT_DEFINITIONS[plant.rarity]["lan_reward_min"], PLANT_DEFINITIONS[plant.rarity]["lan_reward_max"])
+    user.lan_balance += reward
+    plant.is_harvested = True
+    db.commit()
+    return {"message": "Cosechado", "reward": round(reward, 2)}
+
+@app.get("/grupo/info")
+def get_grupo_info(): return {"grupo_id": GRUPO_TELEGRAM_ID}
+
 if __name__ == "__main__":
-    # Iniciar servidor HTTP para mantener el bot vivo en Render
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
-    logger.info(f"🌐 Servidor HTTP iniciado en el puerto {PORT}")
-    
-    # Iniciar el bot (polling) en el hilo principal
-    run_bot()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
